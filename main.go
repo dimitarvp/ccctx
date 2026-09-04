@@ -26,6 +26,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -147,10 +148,10 @@ func main() {
 	if err != nil {
 		failf("%v", err)
 	}
-	if msg := verify(turns, st, path); msg != "" {
+	if msg := verify(turns, &st, path); msg != "" {
 		drift(msg)
 	}
-	warn(st, path)
+	warn(&st, path)
 
 	rep := summarize(turns)
 	rep.SessionID, rep.Transcript = sessionID, path
@@ -192,7 +193,7 @@ func main() {
 func locate(explicit, projects, uuid string, latest bool) (path, sessionID string, err error) {
 	if explicit != "" {
 		if _, err := os.Stat(explicit); err != nil {
-			return "", "", fmt.Errorf("cannot read transcript %s: %v", explicit, err)
+			return "", "", fmt.Errorf("cannot read transcript %s: %w", explicit, err)
 		}
 		return explicit, strings.TrimSuffix(filepath.Base(explicit), ".jsonl"), nil
 	}
@@ -268,7 +269,7 @@ func scan(path string) ([]turn, stats, error) {
 
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, st, fmt.Errorf("cannot open transcript: %v", err)
+		return nil, st, fmt.Errorf("cannot open transcript: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -281,7 +282,7 @@ func scan(path string) ([]turn, stats, error) {
 	for sc.Scan() {
 		st.lines++
 		line := sc.Bytes()
-		if len(strings.TrimSpace(string(line))) == 0 {
+		if strings.TrimSpace(string(line)) == "" {
 			continue
 		}
 		var e entry
@@ -342,12 +343,12 @@ func scan(path string) ([]turn, stats, error) {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		if err == bufio.ErrTooLong {
+		if errors.Is(err, bufio.ErrTooLong) {
 			return nil, st, fmt.Errorf("transcript line %d exceeds ccctx's %d MB line cap.\n"+
 				"  Transcript lines hold whole tool results, so a huge one is plausible; raise maxLine in main.go and rebuild",
 				st.lines+1, maxLine>>20)
 		}
-		return nil, st, fmt.Errorf("failed reading transcript at line %d: %v", st.lines, err)
+		return nil, st, fmt.Errorf("failed reading transcript at line %d: %w", st.lines, err)
 	}
 
 	turns := make([]turn, 0, len(order))
@@ -360,7 +361,7 @@ func scan(path string) ([]turn, stats, error) {
 // verify decides whether the scan found what the format must contain. It returns a
 // message naming the exact JSON path that is missing, because the failure this guards
 // against is a renamed field quietly reading as an empty context window.
-func verify(turns []turn, st stats, path string) string {
+func verify(turns []turn, st *stats, path string) string {
 	where := fmt.Sprintf("  transcript: %s\n  Claude Code version in transcript: %s", path, orUnknown(st.ccVersion))
 
 	switch {
@@ -403,7 +404,7 @@ func verify(turns []turn, st stats, path string) string {
 
 // warn reports non-fatal oddities. They do not invalidate the number but they are the
 // early signal that the format is moving.
-func warn(st stats, path string) {
+func warn(st *stats, path string) {
 	if st.parseErrors > 0 {
 		fmt.Fprintf(os.Stderr, "ccctx warning: skipped %d of %d unparseable lines in %s\n"+
 			"  first was line %d: %s\n",
@@ -439,7 +440,7 @@ func summarize(turns []turn) report {
 // resolveWindow finds the context window size, which the transcript never records.
 // The statusline receives it from Claude Code and writes it to a sensor file, so the
 // size tracks whatever the model actually offers instead of a hardcoded constant.
-func resolveWindow(explicit int, sensorDir, sessionID string) (int, string) {
+func resolveWindow(explicit int, sensorDir, sessionID string) (window int, source string) {
 	if explicit > 0 {
 		return explicit, "flag"
 	}

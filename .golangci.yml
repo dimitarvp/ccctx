@@ -1,0 +1,33 @@
+# Lint contract for this repo (Dimi's ruling 2026-09-05): golangci-lint is the
+# arbiter. vet, staticcheck and errcheck are unconditional; the opinionated
+# linters below are enabled on purpose — every exclusion needs a written reason.
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck      # unhandled error returns
+    - govet         # go vet
+    - staticcheck   # bugs, simplifications, style (SA/S/ST/QF)
+    - unused        # dead code
+    - ineffassign   # assignments never read
+    - errorlint     # errors compared/asserted without errors.Is/As, %w wrapping
+    - gosec         # security: subprocess args, file perms, path traversal, …
+    - gocritic      # diagnostics + style + performance opinions
+    - unparam       # unused function parameters / constant results
+    - misspell      # spelling in comments and strings
+    - prealloc      # slices that could be preallocated
+  settings:
+    gocritic:
+      enabled-tags: [diagnostic, style, performance]
+    errcheck:
+      check-blank: false
+  exclusions:
+    rules:
+      # ccctx reads the transcript path the user or the projects directory gives it;
+      # opening a file by variable path is its whole job.
+      - linters: [gosec]
+        text: "G304"
+formatters:
+  enable:
+    - gofumpt
