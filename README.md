@@ -15,8 +15,12 @@ transcript on disk.
 ccctx <session-uuid>          # by session id, searched under ~/.claude/projects
 ccctx -latest                 # the most recently modified transcript
 ccctx -transcript <path>      # an exact file
-ccctx -plain <uuid>           # print only the token count
+ccctx -plain <uuid>           # the token count, then the meters, as text
 ```
+
+The report ends with `meters` from `~/.cache/claude_usage_limits.json` (override:
+`CCCTX_USAGE_FILE`): the five-hour window, each `.limits[]` entry and the file's
+age in seconds. A missing or malformed file gives `null`; the exit code ignores it.
 
 Exit codes: `0` under the threshold, `10` at or over it, `2` format drift,
 `1` bad invocation or unreadable file. See `-h` for `-threshold`, `-window`,

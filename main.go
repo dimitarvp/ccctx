@@ -21,18 +21,26 @@
 // between versions. Every read is therefore checked against what the format is
 // expected to contain, and anything unrecognized exits DRIFT naming the exact JSON
 // path that disappeared — a renamed field must never read as an empty context.
+//
+// The report also carries the account's usage meters, read from the cache the
+// statusline keeps of Anthropic's usage endpoint, so one command shows both how full
+// the context is and how much of the usage limits is spent. The meters never change
+// the exit code, which answers only the context threshold.
 package main
 
 import (
 	"bufio"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Exit codes. Anything other than OK or OVER means the answer is unusable.
@@ -110,6 +118,37 @@ type report struct {
 	UsedPct      float64        `json:"used_pct,omitempty"`
 	Threshold    int            `json:"threshold_tokens,omitempty"`
 	Over         bool           `json:"over_threshold"`
+	Meters       *meters        `json:"meters"`
+}
+
+// usageCache is the part of the statusline's usage cache that the meters report: the
+// payload of Anthropic's OAuth usage endpoint, stored as fetched. The numbers are
+// pointers so a missing or renamed field is an error, never a reading of 0% used.
+type usageCache struct {
+	FiveHour *struct {
+		Utilization *float64 `json:"utilization"`
+		ResetsAt    *string  `json:"resets_at"`
+	} `json:"five_hour"`
+	Limits []struct {
+		Kind     string   `json:"kind"`
+		Percent  *float64 `json:"percent"`
+		ResetsAt *string  `json:"resets_at"`
+	} `json:"limits"`
+}
+
+// meters is the report's usage block. AgeSeconds is the cache file's age: how long
+// since the statusline last wrote it.
+type meters struct {
+	AgeSeconds int64   `json:"age_seconds"`
+	FiveHour   meter   `json:"five_hour"`
+	Limits     []meter `json:"limits"`
+}
+
+// meter is one usage window. ResetsAt stays null when the payload has no reset time.
+type meter struct {
+	Kind     string  `json:"kind,omitempty"` // empty for the five-hour window, which has its own key
+	Percent  float64 `json:"percent"`
+	ResetsAt *string `json:"resets_at"`
 }
 
 func main() {
@@ -120,12 +159,13 @@ func main() {
 		window     = flag.Int("window", 0, "context window size in tokens (0 = read sensor file)")
 		sensorDir  = flag.String("sensor-dir", filepath.Join(home(), ".cache", "claude_ctx"), "directory of statusline-written sensor files")
 		frac       = flag.Float64("threshold", 0.96, "fraction of the window that counts as over")
-		plain      = flag.Bool("plain", false, "print one token count instead of JSON")
+		plain      = flag.Bool("plain", false, "print the token count, then the usage meters, as text instead of JSON")
 		noThresh   = flag.Bool("no-threshold", false, "report occupancy only; do not require a window size")
 	)
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "usage: ccctx [flags] [session-uuid]\n\n"+
-			"Reports context occupancy for a Claude Code conversation.\n\n"+
+			"Reports context occupancy for a Claude Code conversation, and the usage meters\n"+
+			"from ~/.cache/claude_usage_limits.json (override with CCCTX_USAGE_FILE).\n\n"+
 			"Exit codes:\n"+
 			"  0   under threshold\n"+
 			"  10  at or over threshold\n"+
@@ -174,8 +214,17 @@ func main() {
 			rep.HighWater, *sensorDir))
 	}
 
+	// Unlike the context number, the meters are optional: a cache that cannot be read
+	// warns and reports null.
+	usagePath := cmp.Or(os.Getenv("CCCTX_USAGE_FILE"), filepath.Join(home(), ".cache", "claude_usage_limits.json"))
+	rep.Meters, err = readMeters(usagePath, time.Now())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ccctx warning: no usage meters: %v\n", err)
+	}
+
 	if *plain {
 		fmt.Println(rep.HighWater)
+		fmt.Print(metersText(rep.Meters))
 	} else {
 		out, err := json.MarshalIndent(rep, "", "  ")
 		if err != nil {
@@ -486,6 +535,70 @@ func readSensor(path string, complain bool) (int, bool) {
 		return 0, false
 	}
 	return s.Window, true
+}
+
+// readMeters reads the usage meters from the statusline's cache file and dates
+// them against now.
+func readMeters(path string, now time.Time) (*meters, error) {
+	f, err := os.Open(path) //nolint:gosec // G703: CCCTX_USAGE_FILE names the user's own file; reading it is the override's job
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	b, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	var c usageCache
+	if err := json.Unmarshal(b, &c); err != nil {
+		return nil, fmt.Errorf("cannot parse %s: %w", path, err)
+	}
+	if c.FiveHour == nil || c.FiveHour.Utilization == nil {
+		return nil, fmt.Errorf("%s has no .five_hour.utilization", path)
+	}
+	if c.Limits == nil {
+		return nil, fmt.Errorf("%s has no .limits", path)
+	}
+	m := &meters{
+		AgeSeconds: int64(now.Sub(fi.ModTime()) / time.Second),
+		FiveHour:   meter{Percent: *c.FiveHour.Utilization, ResetsAt: c.FiveHour.ResetsAt},
+		Limits:     make([]meter, 0, len(c.Limits)),
+	}
+	for i, l := range c.Limits {
+		switch {
+		case l.Kind == "":
+			return nil, fmt.Errorf("%s has no .limits[%d].kind", path, i)
+		case l.Percent == nil:
+			return nil, fmt.Errorf("%s has no .limits[%d].percent", path, i)
+		}
+		m.Limits = append(m.Limits, meter{Kind: l.Kind, Percent: *l.Percent, ResetsAt: l.ResetsAt})
+	}
+	return m, nil
+}
+
+// metersText renders the meters for -plain, one window per line.
+func metersText(m *meters) string {
+	if m == nil {
+		return "meters: null\n"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "meters: cache age %ds\n", m.AgeSeconds)
+	line := func(name string, w meter) {
+		fmt.Fprintf(&b, "  %s %g%%", name, w.Percent)
+		if w.ResetsAt != nil {
+			fmt.Fprintf(&b, " resets %s", *w.ResetsAt)
+		}
+		b.WriteByte('\n')
+	}
+	line("five_hour", m.FiveHour)
+	for _, l := range m.Limits {
+		line(l.Kind, l)
+	}
+	return b.String()
 }
 
 func orUnknown(s string) string {
