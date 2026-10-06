@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -52,21 +54,43 @@ func TestReadMeters(t *testing.T) {
 }
 
 // A missing cache is the common failure, as on a machine where the statusline has
-// not fetched yet. Both outputs must say null.
+// not fetched yet. Both outputs must say null, and a caller that merges stdout and
+// stderr (2>&1) must still find the report first and whole, the warning after it.
 func TestReadMetersMissingFile(t *testing.T) {
-	m, err := readMeters(filepath.Join(t.TempDir(), "absent.json"), time.Now())
-	if m != nil || !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("got meters %v and error %v; want nil and a not-exist error", m, err)
+	m, metersErr := readMeters(filepath.Join(t.TempDir(), "absent.json"), time.Now())
+	if m != nil || !errors.Is(metersErr, fs.ErrNotExist) {
+		t.Fatalf("got meters %v and error %v; want nil and a not-exist error", m, metersErr)
 	}
-	out, err := json.Marshal(report{Meters: m})
+	const highWater = 1234
+	rep := report{HighWater: highWater, Meters: m}
+	warning := fmt.Sprintf("ccctx warning: no usage meters: %v\n", metersErr)
+
+	var merged bytes.Buffer
+	if err := writeReport(&merged, &merged, &rep, false, metersErr); err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(&merged)
+	var got map[string]any
+	if err := dec.Decode(&got); err != nil {
+		t.Fatalf("merged output does not open with the JSON report: %v", err)
+	}
+	if v, ok := got["meters"]; !ok || v != nil {
+		t.Errorf("report has meters %v (key present: %v), want null", v, ok)
+	}
+	rest, err := io.ReadAll(io.MultiReader(dec.Buffered(), &merged))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), `"meters":null`) {
-		t.Errorf(`report JSON lacks "meters":null: %s`, out)
+	if string(rest) != "\n"+warning {
+		t.Errorf("after the report: %q, want %q", rest, "\n"+warning)
 	}
-	if text := metersText(m); text != "meters: null\n" {
-		t.Errorf("text = %q, want %q", text, "meters: null\n")
+
+	merged.Reset()
+	if err := writeReport(&merged, &merged, &rep, true, metersErr); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("%d\nmeters: null\n%s", highWater, warning); merged.String() != want {
+		t.Errorf("-plain merged output = %q, want %q", merged.String(), want)
 	}
 }
 

@@ -217,20 +217,10 @@ func main() {
 	// Unlike the context number, the meters are optional: a cache that cannot be read
 	// warns and reports null.
 	usagePath := cmp.Or(os.Getenv("CCCTX_USAGE_FILE"), filepath.Join(home(), ".cache", "claude_usage_limits.json"))
-	rep.Meters, err = readMeters(usagePath, time.Now())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ccctx warning: no usage meters: %v\n", err)
-	}
-
-	if *plain {
-		fmt.Println(rep.HighWater)
-		fmt.Print(metersText(rep.Meters))
-	} else {
-		out, err := json.MarshalIndent(rep, "", "  ")
-		if err != nil {
-			failf("cannot render report as JSON: %v", err)
-		}
-		fmt.Println(string(out))
+	var metersErr error
+	rep.Meters, metersErr = readMeters(usagePath, time.Now())
+	if err := writeReport(os.Stdout, os.Stderr, &rep, *plain, metersErr); err != nil {
+		failf("cannot render report as JSON: %v", err)
 	}
 	if rep.Over {
 		os.Exit(exitOver)
@@ -599,6 +589,28 @@ func metersText(m *meters) string {
 		line(l.Kind, l)
 	}
 	return b.String()
+}
+
+// writeReport prints the report on stdout, then the meters warning, if any, on
+// stderr. The warning goes last so a caller that merges the two streams (2>&1)
+// reads the report first and whole: os.Stdout is not buffered, so the report has
+// left the process before the warning is written.
+func writeReport(stdout, stderr io.Writer, rep *report, plain bool, metersErr error) error {
+	var out string
+	if plain {
+		out = fmt.Sprintf("%d\n%s", rep.HighWater, metersText(rep.Meters))
+	} else {
+		b, err := json.MarshalIndent(rep, "", "  ")
+		if err != nil {
+			return err
+		}
+		out = string(b) + "\n"
+	}
+	_, _ = io.WriteString(stdout, out)
+	if metersErr != nil {
+		_, _ = fmt.Fprintf(stderr, "ccctx warning: no usage meters: %v\n", metersErr)
+	}
+	return nil
 }
 
 func orUnknown(s string) string {
