@@ -94,6 +94,32 @@ func TestReadMetersMissingFile(t *testing.T) {
 	}
 }
 
+// The percentage and the threshold are judged against the window minus the
+// compaction reserve, the point where Claude Code actually compacts.
+func TestJudge(t *testing.T) {
+	cases := []struct {
+		name                       string
+		highWater, window, reserve int
+		frac                       float64
+		wantUsable, wantThreshold  int
+		wantPct                    float64
+		wantOver                   bool
+	}{
+		{"940k of a 1M window compacting at 966k is over a 0.973 threshold", 940_000, 1_000_000, 34_000, 0.973, 966_000, 939_918, 97.3085, true},
+		{"900k of the same is under", 900_000, 1_000_000, 34_000, 0.973, 966_000, 939_918, 93.1677, false},
+		{"a reserve the window cannot hold is ignored", 150_000, 200_000, 250_000, 0.96, 200_000, 192_000, 75, false},
+		{"no reserve judges the full window", 192_000, 200_000, 0, 0.96, 200_000, 192_000, 96, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			usable, pct, threshold, over := judge(c.highWater, c.window, c.reserve, c.frac)
+			if usable != c.wantUsable || threshold != c.wantThreshold || over != c.wantOver || fmt.Sprintf("%.4f", pct) != fmt.Sprintf("%.4f", c.wantPct) {
+				t.Errorf("got usable %d pct %.4f threshold %d over %v; want %d %.4f %d %v", usable, pct, threshold, over, c.wantUsable, c.wantPct, c.wantThreshold, c.wantOver)
+			}
+		})
+	}
+}
+
 // A cache that parses but lacks a number must fail, never read as 0% used.
 func TestReadMetersMalformed(t *testing.T) {
 	const fiveHour = `"five_hour": {"utilization": 3.0, "resets_at": null}`

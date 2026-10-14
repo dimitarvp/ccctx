@@ -115,6 +115,7 @@ type report struct {
 	PerModelPeak map[string]int `json:"per_model_peak"`
 	Window       int            `json:"window_tokens,omitempty"`
 	WindowSource string         `json:"window_source,omitempty"`
+	Usable       int            `json:"usable_tokens,omitempty"`
 	UsedPct      float64        `json:"used_pct,omitempty"`
 	Threshold    int            `json:"threshold_tokens,omitempty"`
 	Over         bool           `json:"over_threshold"`
@@ -161,6 +162,7 @@ func main() {
 		frac       = flag.Float64("threshold", 0.96, "fraction of the window that counts as over")
 		plain      = flag.Bool("plain", false, "print the token count, then the usage meters, as text instead of JSON")
 		noThresh   = flag.Bool("no-threshold", false, "report occupancy only; do not require a window size")
+		reserve    = flag.Int("compaction-reserve", 34000, "tokens Claude Code keeps back for its forced compaction: subtracted from the window before the percentage and the threshold")
 	)
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "usage: ccctx [flags] [session-uuid]\n\n"+
@@ -200,9 +202,7 @@ func main() {
 	rep.Window, rep.WindowSource = resolveWindow(*window, *sensorDir, sessionID)
 	switch {
 	case rep.Window > 0:
-		rep.UsedPct = float64(rep.HighWater) / float64(rep.Window) * 100
-		rep.Threshold = int(float64(rep.Window) * *frac)
-		rep.Over = rep.HighWater >= rep.Threshold
+		rep.Usable, rep.UsedPct, rep.Threshold, rep.Over = judge(rep.HighWater, rep.Window, *reserve, *frac)
 	case !*noThresh:
 		drift(fmt.Sprintf("no context window size available, so %d tokens cannot be judged against a threshold.\n"+
 			"  Claude Code reveals the window size ONLY on the statusline's stdin (.context_window.context_window_size);\n"+
@@ -474,6 +474,22 @@ func summarize(turns []turn) report {
 	last := turns[len(turns)-1]
 	rep.Current, rep.Model = last.ctx, last.model
 	return rep
+}
+
+// judge measures the high-water mark against the usable window: the reported
+// window minus the compaction reserve, because Claude Code compacts at the
+// reported size minus that reserve (observed: a 1,000,000 window compacts at
+// 966,000), so a percentage against the full window reads too low. A reserve
+// that would leave nothing is ignored rather than judged against zero.
+func judge(highWater, window, reserve int, frac float64) (usable int, usedPct float64, threshold int, over bool) {
+	usable = window
+	if reserve > 0 && reserve < window {
+		usable = window - reserve
+	}
+	usedPct = float64(highWater) / float64(usable) * 100
+	threshold = int(float64(usable) * frac)
+	over = highWater >= threshold
+	return usable, usedPct, threshold, over
 }
 
 // resolveWindow finds the context window size, which the transcript never records.
