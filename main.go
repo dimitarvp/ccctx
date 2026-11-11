@@ -586,14 +586,14 @@ func verify(st *stats, path string) string {
 
 	case st.zeroPrompt == st.usable:
 		return fmt.Sprintf("all %d usable turns reported a prompt of 0 tokens.\n"+
-			"  Expected integer fields inside \"message\".\"usage\": \"input_tokens\", \"cache_read_input_tokens\", \"cache_creation_input_tokens\".\n"+
-			"  A usage block that exists but sums to zero means those keys were renamed — treating this as 0 would silently\n"+
+			"  \"message\".\"usage\" carries \"input_tokens\", \"cache_read_input_tokens\" and \"cache_creation_input_tokens\", but they sum to 0 in every turn.\n"+
+			"  A real prompt is never empty, so the prompt is now counted somewhere else. Read as 0, these counts would\n"+
 			"  report an empty context window forever, so it is a hard error instead.\n%s", st.usable, where)
 
 	case st.zeroOutput == st.usable:
 		return fmt.Sprintf("all %d usable turns reported 0 output tokens.\n"+
-			"  Expected an integer field \"message\".\"usage\".\"output_tokens\": every reply has output, and it stays in the context.\n"+
-			"  Zero in every turn means that key was renamed — treating this as 0 would silently report the context short\n"+
+			"  \"message\".\"usage\".\"output_tokens\" is present but 0 in every turn. Every reply has output, and it stays in the context,\n"+
+			"  so the output is now counted somewhere else. Read as 0, this count would report the context short\n"+
 			"  by every reply's length, so it is a hard error instead.\n%s", st.usable, where)
 	}
 	if st.unusableAfterCount != "" {
