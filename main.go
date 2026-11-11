@@ -570,7 +570,7 @@ func verify(st *stats, path string) string {
 	if st.badUsage != "" {
 		return fmt.Sprintf("%s.\n"+
 			"  Every assistant entry since the last compaction must carry all four counts, each an integer from 0 to %d.\n"+
-			"  Read as 0, a missing count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
+			"  Read as 0, a missing or misread count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
 	}
 	if msg := wholeFileDrift(st, where); msg != "" && !st.awaitingReply {
 		return msg
