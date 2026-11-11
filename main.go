@@ -153,19 +153,27 @@ type meter struct {
 }
 
 func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run is the whole command. It returns the exit code and writes only to stdout and
+// stderr, so a test can drive it the way a caller does.
+func run(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("ccctx", flag.ContinueOnError)
+	flags.SetOutput(stderr)
 	var (
-		projects   = flag.String("projects", filepath.Join(home(), ".claude", "projects"), "Claude Code projects directory")
-		transcript = flag.String("transcript", "", "explicit transcript path (skips session lookup)")
-		latest     = flag.Bool("latest", false, "use the most recently modified transcript")
-		window     = flag.Int("window", 0, "context window size in tokens (0 = read sensor file)")
-		sensorDir  = flag.String("sensor-dir", filepath.Join(home(), ".cache", "claude_ctx"), "directory of statusline-written sensor files")
-		frac       = flag.Float64("threshold", 0.96, "fraction of the window that counts as over")
-		plain      = flag.Bool("plain", false, "print the token count, then the usage meters, as text instead of JSON")
-		noThresh   = flag.Bool("no-threshold", false, "report occupancy only; do not require a window size")
-		reserve    = flag.Int("compaction-reserve", 34000, "tokens Claude Code keeps back for its forced compaction: subtracted from the window before the percentage and the threshold")
+		projects   = flags.String("projects", filepath.Join(home(), ".claude", "projects"), "Claude Code projects directory")
+		transcript = flags.String("transcript", "", "explicit transcript path (skips session lookup)")
+		latest     = flags.Bool("latest", false, "use the most recently modified transcript")
+		window     = flags.Int("window", 0, "context window size in tokens (0 = read sensor file)")
+		sensorDir  = flags.String("sensor-dir", filepath.Join(home(), ".cache", "claude_ctx"), "directory of statusline-written sensor files")
+		frac       = flags.Float64("threshold", 0.96, "fraction of the window that counts as over")
+		plain      = flags.Bool("plain", false, "print the token count, then the usage meters, as text instead of JSON")
+		noThresh   = flags.Bool("no-threshold", false, "report occupancy only; do not require a window size")
+		reserve    = flags.Int("compaction-reserve", 34000, "tokens Claude Code keeps back for its forced compaction: subtracted from the window before the percentage and the threshold")
 	)
-	flag.Usage = func() {
-		fmt.Fprint(os.Stderr, "usage: ccctx [flags] [session-uuid]\n\n"+
+	flags.Usage = func() {
+		_, _ = fmt.Fprint(stderr, "usage: ccctx [flags] [session-uuid]\n\n"+
 			"Reports context occupancy for a Claude Code conversation, and the usage meters\n"+
 			"from ~/.cache/claude_usage_limits.json (override with CCCTX_USAGE_FILE).\n\n"+
 			"Exit codes:\n"+
@@ -173,38 +181,47 @@ func main() {
 			"  10  at or over threshold\n"+
 			"  2   DRIFT: the transcript did not contain what it must (see stderr)\n"+
 			"  1   bad invocation or unreadable file\n\n")
-		flag.PrintDefaults()
+		flags.PrintDefaults()
 	}
-	flag.Parse()
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return exitOK
+		}
+		return exitFail // the flag package has already printed the error and the usage
+	}
 
 	if *frac <= 0 || *frac > 1 {
-		failf("-threshold must be between 0 and 1, got %v", *frac)
+		failf(stderr, "-threshold must be between 0 and 1, got %v", *frac)
+		return exitFail
 	}
 
-	path, sessionID, err := locate(*transcript, *projects, flag.Arg(0), *latest)
+	path, sessionID, err := locate(stderr, *transcript, *projects, flags.Arg(0), *latest)
 	if err != nil {
-		failf("%v", err)
+		failf(stderr, "%v", err)
+		return exitFail
 	}
 
 	turns, st, err := scan(path)
 	if err != nil {
-		failf("%v", err)
+		failf(stderr, "%v", err)
+		return exitFail
 	}
 	if msg := verify(turns, &st, path); msg != "" {
-		drift(msg)
+		drift(stderr, msg)
+		return exitDrift
 	}
-	warn(&st, path)
+	warn(stderr, &st, path)
 
 	rep := summarize(turns)
 	rep.SessionID, rep.Transcript = sessionID, path
 	rep.Compactions, rep.CCVersion = st.compactions, st.ccVersion
 
-	rep.Window, rep.WindowSource = resolveWindow(*window, *sensorDir, sessionID)
+	rep.Window, rep.WindowSource = resolveWindow(stderr, *window, *sensorDir, sessionID)
 	switch {
 	case rep.Window > 0:
 		rep.Usable, rep.UsedPct, rep.Threshold, rep.Over = judge(rep.HighWater, rep.Window, *reserve, *frac)
 	case !*noThresh:
-		drift(fmt.Sprintf("no context window size available, so %d tokens cannot be judged against a threshold.\n"+
+		drift(stderr, fmt.Sprintf("no context window size available, so %d tokens cannot be judged against a threshold.\n"+
 			"  Claude Code reveals the window size ONLY on the statusline's stdin (.context_window.context_window_size);\n"+
 			"  it is never written to the transcript.\n"+
 			"  Fix by either:\n"+
@@ -212,6 +229,7 @@ func main() {
 			"    - passing -window <tokens> explicitly\n"+
 			"    - passing -no-threshold to report occupancy without judging it",
 			rep.HighWater, *sensorDir))
+		return exitDrift
 	}
 
 	// Unlike the context number, the meters are optional: a cache that cannot be read
@@ -219,17 +237,19 @@ func main() {
 	usagePath := cmp.Or(os.Getenv("CCCTX_USAGE_FILE"), filepath.Join(home(), ".cache", "claude_usage_limits.json"))
 	var metersErr error
 	rep.Meters, metersErr = readMeters(usagePath, time.Now())
-	if err := writeReport(os.Stdout, os.Stderr, &rep, *plain, metersErr); err != nil {
-		failf("cannot render report as JSON: %v", err)
+	if err := writeReport(stdout, stderr, &rep, *plain, metersErr); err != nil {
+		failf(stderr, "cannot render report as JSON: %v", err)
+		return exitFail
 	}
 	if rep.Over {
-		os.Exit(exitOver)
+		return exitOver
 	}
+	return exitOK
 }
 
 // locate resolves which transcript to read. An explicit path wins, then a session
 // uuid searched across every project directory, then the newest transcript on disk.
-func locate(explicit, projects, uuid string, latest bool) (path, sessionID string, err error) {
+func locate(stderr io.Writer, explicit, projects, uuid string, latest bool) (path, sessionID string, err error) {
 	if explicit != "" {
 		if _, err := os.Stat(explicit); err != nil {
 			return "", "", fmt.Errorf("cannot read transcript %s: %w", explicit, err)
@@ -247,16 +267,16 @@ func locate(explicit, projects, uuid string, latest bool) (path, sessionID strin
 		// slugs (a macOS "-Users-dimi-…" beside a Linux "-home-dimi-…"). Picking one
 		// silently would serve a stale copy the moment they diverge, so say so.
 		if len(matches) > 1 {
-			newest := newestOf(matches)
-			fmt.Fprintf(os.Stderr, "ccctx warning: %d transcripts share session %s; reading the most recently modified one:\n", len(matches), uuid)
+			newest := newestOf(stderr, matches)
+			_, _ = fmt.Fprintf(stderr, "ccctx warning: %d transcripts share session %s; reading the most recently modified one:\n", len(matches), uuid)
 			for _, m := range matches {
 				mark := "  "
 				if m == newest {
 					mark = "->"
 				}
-				fmt.Fprintf(os.Stderr, "  %s %s%s\n", mark, m, modSuffix(m))
+				_, _ = fmt.Fprintf(stderr, "  %s %s%s\n", mark, m, modSuffix(m))
 			}
-			fmt.Fprintf(os.Stderr, "  Pass -transcript <path> to choose deliberately.\n")
+			_, _ = fmt.Fprintf(stderr, "  Pass -transcript <path> to choose deliberately.\n")
 			return newest, uuid, nil
 		}
 		return matches[0], uuid, nil
@@ -269,7 +289,7 @@ func locate(explicit, projects, uuid string, latest bool) (path, sessionID strin
 		return "", "", fmt.Errorf("no transcripts found under %s\n"+
 			"  Either that is the wrong directory (override with -projects) or Claude Code now stores sessions elsewhere", projects)
 	}
-	newest := newestOf(matches)
+	newest := newestOf(stderr, matches)
 	if newest == "" {
 		return "", "", fmt.Errorf("found %d transcripts under %s but could not stat any of them", len(matches), projects)
 	}
@@ -277,12 +297,12 @@ func locate(explicit, projects, uuid string, latest bool) (path, sessionID strin
 }
 
 // newestOf returns the most recently modified path, or "" if none can be stat'ed.
-func newestOf(paths []string) string {
+func newestOf(stderr io.Writer, paths []string) string {
 	newest, newestMod := "", int64(-1)
 	for _, p := range paths {
 		fi, err := os.Stat(p)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ccctx warning: cannot stat %s: %v\n", p, err)
+			_, _ = fmt.Fprintf(stderr, "ccctx warning: cannot stat %s: %v\n", p, err)
 			continue
 		}
 		if mod := fi.ModTime().UnixNano(); mod > newestMod {
@@ -443,18 +463,18 @@ func verify(turns []turn, st *stats, path string) string {
 
 // warn reports non-fatal oddities. They do not invalidate the number but they are the
 // early signal that the format is moving.
-func warn(st *stats, path string) {
+func warn(stderr io.Writer, st *stats, path string) {
 	if st.parseErrors > 0 {
-		fmt.Fprintf(os.Stderr, "ccctx warning: skipped %d of %d unparseable lines in %s\n"+
+		_, _ = fmt.Fprintf(stderr, "ccctx warning: skipped %d of %d unparseable lines in %s\n"+
 			"  first was line %d: %s\n",
 			st.parseErrors, st.lines, path, st.firstParseErrNo, st.firstParseErrMsg)
 	}
 	if st.zeroCtx > 0 && st.zeroCtx < st.usable {
-		fmt.Fprintf(os.Stderr, "ccctx warning: %d of %d turns computed 0 tokens of context; expected every assistant turn to report usage\n",
+		_, _ = fmt.Fprintf(stderr, "ccctx warning: %d of %d turns computed 0 tokens of context; expected every assistant turn to report usage\n",
 			st.zeroCtx, st.usable)
 	}
 	if st.usable > 0 && st.assistantNoUsage > st.usable {
-		fmt.Fprintf(os.Stderr, "ccctx warning: %d assistant entries lacked \"message\".\"usage\" versus %d that had it\n",
+		_, _ = fmt.Fprintf(stderr, "ccctx warning: %d assistant entries lacked \"message\".\"usage\" versus %d that had it\n",
 			st.assistantNoUsage, st.usable)
 	}
 }
@@ -495,12 +515,12 @@ func judge(highWater, window, reserve int, frac float64) (usable int, usedPct fl
 // resolveWindow finds the context window size, which the transcript never records.
 // The statusline receives it from Claude Code and writes it to a sensor file, so the
 // size tracks whatever the model actually offers instead of a hardcoded constant.
-func resolveWindow(explicit int, sensorDir, sessionID string) (window int, source string) {
+func resolveWindow(stderr io.Writer, explicit int, sensorDir, sessionID string) (window int, source string) {
 	if explicit > 0 {
 		return explicit, "flag"
 	}
 	own := filepath.Join(sensorDir, sessionID+".json")
-	if w, ok := readSensor(own, true); ok {
+	if w, ok := readSensor(stderr, own, true); ok {
 		return w, "sensor"
 	}
 	globbed, _ := filepath.Glob(filepath.Join(sensorDir, "*.json"))
@@ -509,8 +529,8 @@ func resolveWindow(explicit int, sensorDir, sessionID string) (window int, sourc
 		if c == own {
 			continue
 		}
-		if w, ok := readSensor(c, false); ok {
-			fmt.Fprintf(os.Stderr, "ccctx warning: no sensor file for this session (%s); using window size from %s instead\n", own, c)
+		if w, ok := readSensor(stderr, c, false); ok {
+			_, _ = fmt.Fprintf(stderr, "ccctx warning: no sensor file for this session (%s); using window size from %s instead\n", own, c)
 			return w, "sensor(other-session)"
 		}
 	}
@@ -519,24 +539,24 @@ func resolveWindow(explicit int, sensorDir, sessionID string) (window int, sourc
 
 // readSensor reads one sensor file. A sensor that exists but cannot be used is
 // reported loudly, since silently ignoring it is how a threshold stops being checked.
-func readSensor(path string, complain bool) (int, bool) {
+func readSensor(stderr io.Writer, path string, complain bool) (int, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if complain && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "ccctx warning: cannot read sensor file %s: %v\n", path, err)
+			_, _ = fmt.Fprintf(stderr, "ccctx warning: cannot read sensor file %s: %v\n", path, err)
 		}
 		return 0, false
 	}
 	var s sensor
 	if err := json.Unmarshal(b, &s); err != nil {
 		if complain {
-			fmt.Fprintf(os.Stderr, "ccctx warning: sensor file %s is not valid JSON: %v\n", path, err)
+			_, _ = fmt.Fprintf(stderr, "ccctx warning: sensor file %s is not valid JSON: %v\n", path, err)
 		}
 		return 0, false
 	}
 	if s.Window <= 0 {
 		if complain {
-			fmt.Fprintf(os.Stderr, "ccctx warning: sensor file %s has no usable \"window\" value (got %d)\n", path, s.Window)
+			_, _ = fmt.Fprintf(stderr, "ccctx warning: sensor file %s has no usable \"window\" value (got %d)\n", path, s.Window)
 		}
 		return 0, false
 	}
@@ -644,16 +664,14 @@ func home() string {
 	return h
 }
 
-func failf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "ccctx: %s\n", fmt.Sprintf(format, args...))
-	os.Exit(exitFail)
+func failf(stderr io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(stderr, "ccctx: %s\n", fmt.Sprintf(format, args...))
 }
 
 // drift means the transcript no longer looks the way ccctx requires. It is separated
 // from ordinary failure so a hook can tell "this tool needs fixing" from "bad input".
-func drift(msg string) {
-	fmt.Fprintf(os.Stderr, "ccctx: FORMAT DRIFT — %s\n\n"+
+func drift(stderr io.Writer, msg string) {
+	_, _ = fmt.Fprintf(stderr, "ccctx: FORMAT DRIFT — %s\n\n"+
 		"ccctx reads Claude Code's private transcript format, which its own documentation says changes between versions.\n"+
 		"This message means the format moved. Re-check the JSON shape and update main.go.\n", msg)
-	os.Exit(exitDrift)
 }
