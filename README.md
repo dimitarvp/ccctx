@@ -125,8 +125,16 @@ object, or an assistant entry without a usage block, after the last counted
 reply: that is what a format change partway through a transcript looks like.
 Followed by a counted reply, such lines stay warnings. A last line with no
 newline after it is one Claude Code is still writing, and ccctx leaves it
-out. A value of an unexpected type matters only in an entry that is counted:
-subagent entries, placeholders and other entries may hold anything.
+out.
+
+The fields that decide how an entry is sorted must hold their own JSON type
+in every entry, wherever it stands: `type` a string, `isSidechain` and
+`isCompactSummary` true or false, or absent. In a main-thread assistant
+entry, `message` must be an object and its `model` a string. Another type,
+null included, exits `2` naming the key, the value and the line, and no
+later entry clears it. Every other field matters only in an entry that is
+counted: the usage of a subagent entry, a placeholder or any other entry
+that is not counted may hold anything, its sorting fields may not.
 
 ## Use as a Stop hook
 

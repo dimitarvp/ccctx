@@ -39,7 +39,10 @@
 // 1,000,000,000, and no line that is not a JSON object, nor an assistant entry without
 // usage, may come after the last counted reply; each breach exits DRIFT naming the key
 // or the line. A last line with no newline after it is still being written and is left
-// out. A value of an unexpected type matters only in an entry that is counted.
+// out. Anywhere in the transcript, the fields that sort an entry must hold their own
+// JSON type: type, isSidechain, isCompactSummary, and a main-thread assistant entry's
+// message and model. Any other value of an unexpected type matters only in an entry
+// that is counted.
 //
 // The report also carries the account's usage meters, read from the cache the
 // statusline keeps of Anthropic's usage endpoint, so one command shows both how full
@@ -89,22 +92,24 @@ type entry struct {
 	Message          json.RawMessage
 }
 
-// parseLine fails only when the line is not a JSON object. Each field is decoded on its
-// own because after a value of the wrong type, encoding/json does not promise to fill
-// the fields that follow it.
-func parseLine(line []byte) (entry, error) {
+// parseLine fails only when the line is not a JSON object. A field that decides how the
+// entry is sorted but holds another JSON type comes back as mistyped. Each field is
+// decoded on its own because after a value of the wrong type, encoding/json does not
+// promise to fill the fields that follow it.
+func parseLine(line []byte) (e entry, mistyped string, err error) {
 	fields, err := object(line)
 	if err != nil {
-		return entry{}, err
+		return entry{}, "", err
 	}
-	var e entry
-	field(fields, "type", &e.Type)
-	field(fields, "isSidechain", &e.IsSidechain)
-	field(fields, "isCompactSummary", &e.IsCompactSummary)
+	mistyped = cmp.Or(
+		typed(fields, "type", &e.Type),
+		typed(fields, "isSidechain", &e.IsSidechain),
+		typed(fields, "isCompactSummary", &e.IsCompactSummary),
+	)
 	field(fields, "timestamp", &e.Timestamp)
 	field(fields, "version", &e.Version)
 	e.Message = fields["message"]
-	return e, nil
+	return e, mistyped, nil
 }
 
 func object(raw []byte) (map[string]json.RawMessage, error) {
@@ -122,6 +127,16 @@ func object(raw []byte) (map[string]json.RawMessage, error) {
 // field decodes one value. A value that is absent or of another type leaves dst empty.
 func field(fields map[string]json.RawMessage, key string, dst any) {
 	_ = json.Unmarshal(fields[key], dst)
+}
+
+// typed decodes a field that decides how an entry is sorted. An absent key leaves dst
+// empty. A value of another JSON type, null included, is returned as found.
+func typed(fields map[string]json.RawMessage, key string, dst any) string {
+	raw, ok := fields[key]
+	if ok && (string(raw) == "null" || json.Unmarshal(raw, dst) != nil) {
+		return fmt.Sprintf("%q is %s", key, raw)
+	}
+	return ""
 }
 
 // maxCount bounds one usage count. No context window comes near it, so a count past
@@ -167,6 +182,7 @@ type stats struct {
 	compactions        int
 	awaitingReply      bool
 	ccVersion          string
+	mistyped           string
 	badUsage           string
 	unusableAfterCount string
 }
@@ -468,7 +484,7 @@ func scan(path string) ([]turn, stats, error) {
 		if len(line) == 0 {
 			continue
 		}
-		e, err := parseLine(line)
+		e, mistyped, err := parseLine(line)
 		if err != nil {
 			if unterminated {
 				continue // the last line, which Claude Code may still be writing
@@ -482,6 +498,10 @@ func scan(path string) ([]turn, stats, error) {
 		}
 		if e.Version != "" {
 			st.ccVersion = e.Version // keep the last: that is the version still writing
+		}
+		if mistyped != "" {
+			st.mistyped = cmp.Or(st.mistyped, fmt.Sprintf("line %d: %s", st.lines, mistyped))
+			continue
 		}
 		// A subagent compacting its own context leaves the main thread's window as it was.
 		if e.IsCompactSummary && !e.IsSidechain {
@@ -498,12 +518,19 @@ func scan(path string) ([]turn, stats, error) {
 			st.sidechain++
 			continue
 		}
+		msg, _ := object(e.Message)
+		if msg == nil && e.Message != nil {
+			st.mistyped = cmp.Or(st.mistyped, fmt.Sprintf(`line %d: "message" is %s`, st.lines, e.Message))
+			continue
+		}
+		var model, id string
+		if bad := typed(msg, "model", &model); bad != "" {
+			st.mistyped = cmp.Or(st.mistyped, fmt.Sprintf(`line %d: "message".%s`, st.lines, bad))
+			continue
+		}
 		// Claude Code writes placeholder entries (model "<synthetic>") for refusals and
 		// API errors. They carry an all-zero usage block and describe no prompt, so one
 		// landing last would report an empty context.
-		msg, _ := object(e.Message)
-		var model, id string
-		field(msg, "model", &model)
 		if model == syntheticModel {
 			st.synthetic++
 			continue
@@ -567,6 +594,12 @@ func scan(path string) ([]turn, stats, error) {
 func verify(st *stats, path string) string {
 	where := fmt.Sprintf("  transcript: %s\n  Claude Code version in transcript: %s", path, orUnknown(st.ccVersion))
 
+	if st.mistyped != "" {
+		return fmt.Sprintf("%s.\n"+
+			"  Where present, \"type\" must be a string and \"isSidechain\" and \"isCompactSummary\" true or false, and a\n"+
+			"  main-thread assistant entry's \"message\" an object with a string \"model\". These fields decide which entries\n"+
+			"  count. Read as empty, a value of another type could count a subagent's reply or miss a compaction.\n%s", st.mistyped, where)
+	}
 	if st.badUsage != "" {
 		return fmt.Sprintf("%s.\n"+
 			"  Every assistant entry since the last compaction must carry all four counts, each an integer from 0 to %d.\n"+
