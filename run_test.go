@@ -138,13 +138,14 @@ func TestRunUnderTheLine(t *testing.T) {
 		t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
 	}
 	keys, values := decodeReport(t, res.stdout)
-	wantKeys := "session_id transcript cc_version current_tokens high_water_tokens model turns compactions per_model_peak " +
+	wantKeys := "session_id transcript cc_version count_known current_tokens high_water_tokens model turns compactions per_model_peak " +
 		"window_tokens window_source usable_tokens used_pct checkpoint_line_tokens " +
 		"left_to_checkpoint_tokens left_to_compaction_tokens over_checkpoint_line meters"
 	if got := strings.Join(keys, " "); got != wantKeys {
 		t.Errorf("keys:\n got %s\nwant %s", got, wantKeys)
 	}
 	checkValues(t, values, map[string]string{
+		"count_known":               "true",
 		"current_tokens":            "864444",
 		"high_water_tokens":         "864444",
 		"window_tokens":             "1000000",
@@ -271,6 +272,36 @@ func TestRunSidechainCompaction(t *testing.T) {
 	})
 }
 
+// Right after a compaction, before the next reply, the transcript holds no count of
+// the emptied window. The report says the count is unknown and judges the limits on
+// 0, so the peak from before the compaction cannot ask for a checkpoint.
+func TestRunAfterCompaction(t *testing.T) {
+	path := writeSession(t, reply("m1", 948_000, 3_000), compaction)
+
+	res := ccctx(t, "-window", "1000000", "-transcript", path)
+	if res.code != exitOK {
+		t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+	}
+	_, values := decodeReport(t, res.stdout)
+	checkValues(t, values, map[string]string{
+		"count_known":               "false",
+		"current_tokens":            "0",
+		"high_water_tokens":         "0",
+		"turns":                     "0",
+		"compactions":               "1",
+		"left_to_checkpoint_tokens": "936000",
+		"over_checkpoint_line":      "false",
+	})
+	checkInvariant(t, values)
+
+	res = ccctx(t, "-plain", "-window", "1000000", "-transcript", path)
+	lines := strings.SplitN(res.stdout, "\n", 3)
+	if res.code != exitOK || len(lines) != 3 || lines[0] != "0" || !strings.Contains(lines[1], "unknown until the next reply") {
+		t.Errorf("-plain: exit %d, stdout:\n%s\nwant exit %d, then 0, then a line saying the count is unknown until the next reply",
+			res.code, res.stdout, exitOK)
+	}
+}
+
 // Without a window size there is nothing to judge: -no-threshold reports occupancy
 // alone, with none of the limit fields, and without it the missing size is drift.
 func TestRunNoWindow(t *testing.T) {
@@ -281,7 +312,7 @@ func TestRunNoWindow(t *testing.T) {
 		t.Fatalf("-no-threshold: exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
 	}
 	keys, _ := decodeReport(t, res.stdout)
-	wantKeys := "session_id transcript cc_version current_tokens high_water_tokens model turns compactions per_model_peak meters"
+	wantKeys := "session_id transcript cc_version count_known current_tokens high_water_tokens model turns compactions per_model_peak meters"
 	if got := strings.Join(keys, " "); got != wantKeys {
 		t.Errorf("keys:\n got %s\nwant %s", got, wantKeys)
 	}
