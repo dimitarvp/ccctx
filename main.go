@@ -31,14 +31,15 @@
 //
 // The transcript is Claude Code's private format and its own docs warn it changes
 // between versions. Every read is therefore checked against what the format is
-// expected to contain: a transcript with no parseable line, no assistant entry, no
-// usage block, a prompt side of zero in every turn or an output of zero in every turn
-// exits DRIFT naming the JSON path that disappeared. Those whole-file checks wait while
-// the count is unknown right after a compaction. Since the last compaction, every
-// usage block must carry all four counts, each an integer from 0 to 1,000,000,000, and
-// no unparseable line or assistant entry without usage may come after the last counted
-// reply; each breach exits DRIFT naming the key or the line. A last line with no
-// newline after it is still being written and is left out.
+// expected to contain: a transcript with no line that is a JSON object, no assistant
+// entry, no usage block, a prompt side of zero in every turn or an output of zero in
+// every turn exits DRIFT naming the JSON path that disappeared. Those whole-file checks
+// wait while the count is unknown right after a compaction. Since the last compaction,
+// every usage block must carry all four counts, each an integer from 0 to
+// 1,000,000,000, and no line that is not a JSON object, nor an assistant entry without
+// usage, may come after the last counted reply; each breach exits DRIFT naming the key
+// or the line. A last line with no newline after it is still being written and is left
+// out. A value of an unexpected type matters only in an entry that is counted.
 //
 // The report also carries the account's usage meters, read from the cache the
 // statusline keeps of Anthropic's usage endpoint, so one command shows both how full
@@ -88,6 +89,21 @@ type entry struct {
 		Model string                     `json:"model"`
 		Usage map[string]json.RawMessage `json:"usage"` // raw, so each count is read as written
 	} `json:"message"`
+}
+
+// parseLine reads one transcript line. Only a line that is not a JSON object fails. A
+// value of the wrong type leaves its field empty instead: an entry that is never counted
+// may hold anything, and a counted entry's usage is checked key by key.
+func parseLine(line []byte) (entry, error) {
+	var e entry
+	err := json.Unmarshal(line, &e)
+	if errors.As(err, new(*json.UnmarshalTypeError)) {
+		err = nil
+	}
+	if err == nil && line[0] != '{' {
+		err = errors.New("valid JSON of another type")
+	}
+	return e, err
 }
 
 // maxCount bounds one usage count. No context window comes near it, so a count past
@@ -435,12 +451,12 @@ func scan(path string) ([]turn, stats, error) {
 
 	for sc.Scan() {
 		st.lines++
-		line := sc.Bytes()
-		if strings.TrimSpace(string(line)) == "" {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
 			continue
 		}
-		var e entry
-		if err := json.Unmarshal(line, &e); err != nil {
+		e, err := parseLine(line)
+		if err != nil {
 			if unterminated {
 				continue // the last line, which Claude Code may still be writing
 			}
@@ -448,7 +464,7 @@ func scan(path string) ([]turn, stats, error) {
 			if st.firstParseErrNo == 0 {
 				st.firstParseErrNo, st.firstParseErrMsg = st.lines, err.Error()
 			}
-			st.unusableAfterCount = cmp.Or(st.unusableAfterCount, fmt.Sprintf("line %d does not parse as JSON (%v)", st.lines, err))
+			st.unusableAfterCount = cmp.Or(st.unusableAfterCount, fmt.Sprintf("line %d is not a JSON object (%v)", st.lines, err))
 			continue
 		}
 		if e.Version != "" {
@@ -478,7 +494,7 @@ func scan(path string) ([]turn, stats, error) {
 		}
 		if e.Message.Usage == nil {
 			st.assistantNoUsage++
-			st.unusableAfterCount = cmp.Or(st.unusableAfterCount, fmt.Sprintf(`line %d is an assistant entry without "message"."usage"`, st.lines))
+			st.unusableAfterCount = cmp.Or(st.unusableAfterCount, fmt.Sprintf(`line %d is an assistant entry without a "message"."usage" object`, st.lines))
 			continue
 		}
 		prompt, output, err := usageCounts(e.Message.Usage)
@@ -539,9 +555,9 @@ func verify(st *stats, path string) string {
 		return fmt.Sprintf("transcript is empty (0 lines).\n%s", where)
 
 	case st.parseErrors == st.lines:
-		return fmt.Sprintf("every one of the %d lines failed to parse as JSON.\n"+
+		return fmt.Sprintf("none of the %d lines is a JSON object.\n"+
 			"  first failure was line %d: %s\n"+
-			"  The transcript is expected to be JSON Lines, one object per line — that no longer holds.\n%s",
+			"  The transcript is expected to be JSON Lines, one object per line. That no longer holds.\n%s",
 			st.lines, st.firstParseErrNo, st.firstParseErrMsg, where)
 
 	case st.badUsage != "":

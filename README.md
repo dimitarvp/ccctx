@@ -109,8 +109,8 @@ as usual and exit `10` stays possible.
 ## Format drift is a hard error
 
 The transcript format is Claude Code private and changes between versions.
-ccctx exits `2` and says what it expected when the transcript has no
-parseable line, no assistant entry, or no usable entry (an assistant entry
+ccctx exits `2` and says what it expected when the transcript has no line
+that is a JSON object, no assistant entry, or no usable entry (an assistant entry
 that is not skipped and has a usage block). It does the same when every
 usable entry has a prompt side of zero (the three prompt fields together),
 or an output of zero. These whole-file checks wait while the count is
@@ -119,11 +119,13 @@ unknown right after a compaction.
 Since the last compaction, every usage block must carry all four counts,
 each an integer from 0 to 1,000,000,000. A missing key, or a count that is a
 fraction, a string or out of range, exits `2` naming the key, the value and
-the line, even when a good reply follows. So does an unparseable line, or an
-assistant entry without a usage block, after the last counted reply: that
-is what a format change partway through a transcript looks like. Followed
-by a counted reply, such lines stay warnings. A last line with no newline
-after it is one Claude Code is still writing, and ccctx leaves it out.
+the line, even when a good reply follows. So does a line that is not a JSON
+object, or an assistant entry without a usage block, after the last counted
+reply: that is what a format change partway through a transcript looks like.
+Followed by a counted reply, such lines stay warnings. A last line with no
+newline after it is one Claude Code is still writing, and ccctx leaves it
+out. A value of an unexpected type matters only in an entry that is counted:
+subagent entries, placeholders and other entries may hold anything.
 
 ## Use as a Stop hook
 
