@@ -665,6 +665,40 @@ func TestRunCountNotAnInteger(t *testing.T) {
 	}
 }
 
+// The fields that decide how an entry is sorted must hold their own JSON type. Read as
+// false or empty, another type would count a subagent reply or miss a compaction, so it
+// is drift wherever it stands.
+func TestRunMistypedSortingField(t *testing.T) {
+	with := func(field, entry string) string { return "{" + field + "," + strings.TrimPrefix(entry, "{") }
+	good := reply("m1", 500_000, 2_000)
+	cases := []struct {
+		name, key, value, line string
+		entries                []string
+	}{
+		{"isSidechain a string, after a compaction", `"isSidechain"`, `"true"`, "line 3", []string{good, compaction, with(`"isSidechain":"true"`, reply("s1", 4_000, 10))}},
+		{"isSidechain null", `"isSidechain"`, "null", "line 2", []string{good, with(`"isSidechain":null`, reply("m2", 4_000, 10))}},
+		{"isCompactSummary a string, a reply after it", `"isCompactSummary"`, `"true"`, "line 2", []string{good, strings.Replace(compaction, "true", `"true"`, 1), reply("m2", 5_000, 100)}},
+		{"type an array, before a compaction and a reply", `"type"`, `["assistant"]`, "line 1", []string{`{"type":["assistant"],"timestamp":"2026-01-01T00:00:00Z"}`, compaction, good}},
+		{"a reply whose message is a string, a reply after it", `"message"`, `"text"`, "line 1", []string{`{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":"text"}`, good}},
+		{"a reply whose model is an object, a reply after it", `"message"."model"`, `{"name":"claude-test"}`, "line 1", []string{strings.Replace(reply("m0", 4_000, 10), `"claude-test"`, `{"name":"claude-test"}`, 1), good}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
+			missing := []string{}
+			for _, s := range []string{c.key, c.value, c.line} {
+				if !strings.Contains(res.stderr, s) {
+					missing = append(missing, s)
+				}
+			}
+			if res.code != exitDrift || res.stdout != "" || len(missing) > 0 {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, stderr containing %q",
+					res.code, res.stdout, res.stderr, exitDrift, missing)
+			}
+		})
+	}
+}
+
 // What came before the last counted reply, or before the last compaction, no longer
 // decides the count, so it is no drift.
 func TestRunUsageNoDrift(t *testing.T) {
@@ -700,6 +734,7 @@ func TestRunOddValuesOutsideCountedEntries(t *testing.T) {
 		{"a subagent reply with a count past int64", subagentCount("99999999999999999999")},
 		{"a placeholder whose usage is a string", `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"id":"ms","model":"<synthetic>","usage":"none"}}`},
 		{"a user entry whose message is a string", `{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":"plain text"}`},
+		{"a subagent reply whose message is a string", sidechain(`{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":"text"}`)},
 		{"a system entry with a numeric timestamp", `{"type":"system","timestamp":1767225600,"content":"x"}`},
 	}
 	for _, c := range cases {
