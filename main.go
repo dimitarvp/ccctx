@@ -78,29 +78,50 @@ const maxLine = 64 << 20
 // syntheticModel marks Claude Code's own placeholder entries rather than a model reply.
 const syntheticModel = "<synthetic>"
 
+// entry is what every transcript line is read for. The message stays raw until the
+// entry turns out to be a main-thread assistant entry.
 type entry struct {
-	Type             string `json:"type"`
-	IsSidechain      bool   `json:"isSidechain"`
-	IsCompactSummary bool   `json:"isCompactSummary"`
-	Timestamp        string `json:"timestamp"`
-	Version          string `json:"version"`
-	Message          struct {
-		ID    string                     `json:"id"`
-		Model string                     `json:"model"`
-		Usage map[string]json.RawMessage `json:"usage"`
-	} `json:"message"`
+	Type             string
+	IsSidechain      bool
+	IsCompactSummary bool
+	Timestamp        string
+	Version          string
+	Message          json.RawMessage
 }
 
+// parseLine fails only when the line is not a JSON object. Each field is decoded on its
+// own because after a value of the wrong type, encoding/json does not promise to fill
+// the fields that follow it.
 func parseLine(line []byte) (entry, error) {
+	fields, err := object(line)
+	if err != nil {
+		return entry{}, err
+	}
 	var e entry
-	err := json.Unmarshal(line, &e)
-	if errors.As(err, new(*json.UnmarshalTypeError)) {
-		err = nil
+	field(fields, "type", &e.Type)
+	field(fields, "isSidechain", &e.IsSidechain)
+	field(fields, "isCompactSummary", &e.IsCompactSummary)
+	field(fields, "timestamp", &e.Timestamp)
+	field(fields, "version", &e.Version)
+	e.Message = fields["message"]
+	return e, nil
+}
+
+func object(raw []byte) (map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	err := json.Unmarshal(raw, &fields)
+	switch {
+	case errors.As(err, new(*json.UnmarshalTypeError)), err == nil && fields == nil:
+		return nil, errors.New("valid JSON of another type")
+	case err != nil:
+		return nil, err
 	}
-	if err == nil && line[0] != '{' {
-		err = errors.New("valid JSON of another type")
-	}
-	return e, err
+	return fields, nil
+}
+
+// field decodes one value. A value that is absent or of another type leaves dst empty.
+func field(fields map[string]json.RawMessage, key string, dst any) {
+	_ = json.Unmarshal(fields[key], dst)
 }
 
 // maxCount bounds one usage count. No context window comes near it, so a count past
@@ -480,16 +501,20 @@ func scan(path string) ([]turn, stats, error) {
 		// Claude Code writes placeholder entries (model "<synthetic>") for refusals and
 		// API errors. They carry an all-zero usage block and describe no prompt, so one
 		// landing last would report an empty context.
-		if e.Message.Model == syntheticModel {
+		msg, _ := object(e.Message)
+		var model, id string
+		field(msg, "model", &model)
+		if model == syntheticModel {
 			st.synthetic++
 			continue
 		}
-		if e.Message.Usage == nil {
+		usage, _ := object(msg["usage"])
+		if usage == nil {
 			st.assistantNoUsage++
 			st.unusableAfterCount = cmp.Or(st.unusableAfterCount, fmt.Sprintf(`line %d is an assistant entry without a "message"."usage" object`, st.lines))
 			continue
 		}
-		prompt, output, err := usageCounts(e.Message.Usage)
+		prompt, output, err := usageCounts(usage)
 		if err != nil {
 			st.badUsage = cmp.Or(st.badUsage, fmt.Sprintf("line %d: %v", st.lines, err))
 			continue
@@ -505,10 +530,10 @@ func scan(path string) ([]turn, stats, error) {
 		}
 		t := turn{
 			ctx:   prompt + output,
-			model: e.Message.Model,
+			model: model,
 			ts:    e.Timestamp,
 		}
-		id := e.Message.ID
+		field(msg, "id", &id)
 		if id == "" {
 			id = e.Timestamp
 		}
