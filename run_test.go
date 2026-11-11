@@ -30,12 +30,24 @@ func ccctx(t *testing.T, args ...string) result {
 // writeSession writes a transcript of the given entries and returns its path.
 func writeSession(t *testing.T, entries ...string) string {
 	t.Helper()
+	return writeTranscript(t, strings.Join(entries, "\n")+"\n")
+}
+
+// writeTranscript writes a transcript file exactly as given and returns its path.
+func writeTranscript(t *testing.T, body string) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	if err := os.WriteFile(path, []byte(strings.Join(entries, "\n")+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
+
+// compaction is the main thread's compaction entry: the window empties here.
+const compaction = `{"type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"summary"}}`
+
+// noUsage is an assistant entry of the main thread without a usage block.
+const noUsage = `{"type":"assistant","version":"2.1.0","timestamp":"2026-01-01T00:00:00Z","message":{"id":"mx","model":"claude-test"}}`
 
 // assistant is one assistant entry with its usage block, as Claude Code writes it.
 func assistant(id string, input, cacheRead, cacheCreation, output int) string {
@@ -242,7 +254,7 @@ func TestRunKeepsLargestReading(t *testing.T) {
 func TestRunSidechainCompaction(t *testing.T) {
 	path := writeSession(t,
 		reply("m1", 948_000, 3_000),
-		sidechain(`{"type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"summary"}}`),
+		sidechain(compaction),
 		sidechain(reply("s1", 20_000, 500)),
 		sidechain(reply("s2", 21_000, 400)),
 	)
@@ -396,6 +408,70 @@ func TestRunDrift(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A usage block that cannot be read whole stops the run, and so do unusable lines after
+// the last counted reply, where a format change partway through a transcript would
+// leave the count at the last reply ccctx could read. Each message names the key or
+// the line.
+func TestRunUsageDrift(t *testing.T) {
+	renamed := strings.Replace(reply("m1", 500_000, 2_000), "cache_read_input_tokens", "cache_read_tokens", 1)
+	cases := []struct {
+		name, want string
+		entries    []string
+	}{
+		{"a renamed key, a good reply after it", `"cache_read_input_tokens"`, []string{renamed, reply("m2", 600_000, 2_000)}},
+		{"a count above 1e9", `"output_tokens"`, []string{reply("m1", 500_000, 1_000_000_001)}},
+		{"a negative count", `"input_tokens"`, []string{assistant("m1", -5, 500_000, 1_000, 2_000)}},
+		{"no usage after the last counted reply", "line 2", []string{reply("m1", 500_000, 2_000), noUsage}},
+		{"an unparseable line after the last counted reply", "line 2", []string{reply("m1", 500_000, 2_000), "{this is not json}"}},
+		{"no usage after a compaction, nothing counted since", "line 3", []string{reply("m1", 500_000, 2_000), compaction, noUsage}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
+			if res.code != exitDrift || res.stdout != "" || !strings.Contains(res.stderr, c.want) {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d naming %s", res.code, res.stdout, res.stderr, exitDrift, c.want)
+			}
+		})
+	}
+}
+
+// What came before the last counted reply, or before the last compaction, no longer
+// decides the count, so it is no drift.
+func TestRunUsageNoDrift(t *testing.T) {
+	renamed := strings.Replace(reply("m1", 500_000, 2_000), "cache_read_input_tokens", "cache_read_tokens", 1)
+	cases := []struct {
+		name, current string
+		entries       []string
+	}{
+		{"no usage before a counted reply", "502000", []string{noUsage, reply("m2", 500_000, 2_000)}},
+		{"an unparseable line before a counted reply", "502000", []string{"{this is not json}", reply("m2", 500_000, 2_000)}},
+		{"a renamed key before a compaction", "302000", []string{renamed, compaction, reply("m2", 300_000, 2_000)}},
+		{"a count of exactly 1e9", "1000500000", []string{reply("m1", 500_000, 1_000_000_000)}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, "-no-threshold", "-transcript", writeSession(t, c.entries...))
+			if res.code != exitOK {
+				t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+			}
+			_, values := decodeReport(t, res.stdout)
+			checkValues(t, values, map[string]string{"current_tokens": c.current})
+		})
+	}
+}
+
+// A last line with no newline after it is one Claude Code is still writing. It is
+// left out without a word, never counted as an unparseable line.
+func TestRunHalfWrittenLastLine(t *testing.T) {
+	path := writeTranscript(t, reply("m1", 500_000, 2_000)+"\n"+`{"type":"assistant","message":{"id":"m2","usa`)
+	res := ccctx(t, "-window", "1000000", "-transcript", path)
+	if res.code != exitOK || res.stderr != "" {
+		t.Fatalf("exit %d, stderr:\n%s\nwant exit %d and an empty stderr", res.code, res.stderr, exitOK)
+	}
+	_, values := decodeReport(t, res.stdout)
+	checkValues(t, values, map[string]string{"current_tokens": "502000"})
 }
 
 // -plain prints the high water, then the limits on one line, then the meters.
