@@ -625,6 +625,7 @@ func TestRunUsageDrift(t *testing.T) {
 		{"a negative count", `"input_tokens"`, []string{assistant("m1", -5, 500_000, 1_000, 2_000)}},
 		{"no usage after the last counted reply", "line 2", []string{reply("m1", 500_000, 2_000), noUsage}},
 		{"an unparseable line after the last counted reply", "line 2", []string{reply("m1", 500_000, 2_000), "{this is not json}"}},
+		{"JSON that is not an object after the last counted reply", "line 2", []string{reply("m1", 500_000, 2_000), "null"}},
 		{"no usage after a compaction, nothing counted since", "line 3", []string{reply("m1", 500_000, 2_000), compaction, noUsage}},
 		{"no usage after an opening compaction", "line 2", []string{compaction, noUsage}},
 		{"a renamed key after an opening compaction", `"cache_read_input_tokens"`, []string{compaction, renamed}},
@@ -692,6 +693,31 @@ func TestRunUsageNoDrift(t *testing.T) {
 			}
 			_, values := decodeReport(t, res.stdout)
 			checkValues(t, values, map[string]string{"current_tokens": c.current})
+		})
+	}
+}
+
+// A line is unparseable only when it is not a JSON object. A value of an unexpected
+// type in an entry that is never counted is no drift, even after the last counted reply.
+func TestRunOddValuesOutsideCountedEntries(t *testing.T) {
+	subagentCount := func(output string) string {
+		return sidechain(strings.Replace(reply("s1", 20_000, 500), `"output_tokens":500`, `"output_tokens":`+output, 1))
+	}
+	cases := []struct{ name, entry string }{
+		{"a subagent reply with a fractional count", subagentCount("2.5")},
+		{"a subagent reply with a count past int64", subagentCount("99999999999999999999")},
+		{"a placeholder whose usage is a string", `{"type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"id":"ms","model":"<synthetic>","usage":"none"}}`},
+		{"a user entry whose message is a string", `{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":"plain text"}`},
+		{"a system entry with a numeric timestamp", `{"type":"system","timestamp":1767225600,"content":"x"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, reply("m1", 500_000, 2_000), c.entry))
+			if res.code != exitOK {
+				t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+			}
+			_, values := decodeReport(t, res.stdout)
+			checkValues(t, values, map[string]string{"current_tokens": "502000"})
 		})
 	}
 }
