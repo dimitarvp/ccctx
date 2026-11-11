@@ -21,11 +21,10 @@ type result struct {
 // directory and the meters fixture, so nothing on the machine is read.
 func ccctx(t *testing.T, args ...string) result {
 	t.Helper()
-	return ccctxUsage(t, filepath.Join("testdata", "claude_usage_limits.json"), args...)
+	return ccctxWithUsageFile(t, filepath.Join("testdata", "claude_usage_limits.json"), args...)
 }
 
-// ccctxUsage is ccctx with the meters read from the given usage cache.
-func ccctxUsage(t *testing.T, usageFile string, args ...string) result {
+func ccctxWithUsageFile(t *testing.T, usageFile string, args ...string) result {
 	t.Helper()
 	t.Setenv("CCCTX_USAGE_FILE", usageFile)
 	var stdout, stderr bytes.Buffer
@@ -39,7 +38,6 @@ func writeSession(t *testing.T, entries ...string) string {
 	return writeTranscript(t, strings.Join(entries, "\n")+"\n")
 }
 
-// writeTranscript writes a transcript file exactly as given and returns its path.
 func writeTranscript(t *testing.T, body string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -49,10 +47,8 @@ func writeTranscript(t *testing.T, body string) string {
 	return path
 }
 
-// compaction is the main thread's compaction entry: the window empties here.
 const compaction = `{"type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"summary"}}`
 
-// noUsage is an assistant entry of the main thread without a usage block.
 const noUsage = `{"type":"assistant","version":"2.1.0","timestamp":"2026-01-01T00:00:00Z","message":{"id":"mx","model":"claude-test"}}`
 
 // assistant is one assistant entry with its usage block, as Claude Code writes it.
@@ -256,9 +252,6 @@ func TestRunKeepsLargestReading(t *testing.T) {
 	}
 }
 
-// Claude Code writes a placeholder entry, model "<synthetic>" with an all-zero usage
-// block, for refusals and API errors. One landing last leaves the count at the last
-// real reply.
 func TestRunSyntheticLast(t *testing.T) {
 	synthetic := strings.Replace(assistant("m2", 0, 0, 0, 0), "claude-test", "<synthetic>", 1)
 	path := writeSession(t, reply("m1", 500_000, 3_010), synthetic)
@@ -299,8 +292,7 @@ func TestRunSidechainCompaction(t *testing.T) {
 }
 
 // Right after a compaction, before the next reply, the transcript holds no count of
-// the emptied window. The report says the count is unknown and judges the limits on
-// 0, so the peak from before the compaction cannot ask for a checkpoint.
+// the emptied window. The peak from before the compaction must not ask for a checkpoint.
 func TestRunAfterCompaction(t *testing.T) {
 	path := writeSession(t, reply("m1", 948_000, 3_000), compaction)
 
@@ -349,9 +341,6 @@ func TestRunNoWindow(t *testing.T) {
 	}
 }
 
-// A session is judged on its own window only: the flag, else its own sensor file.
-// Another session's file may describe another model, so it is never used, and the
-// first line of stderr names the flag that supplies the size.
 func TestRunWindowSource(t *testing.T) {
 	path := writeSession(t, reply("m1", 500_000, 2_000))
 	sensorDir := func(t *testing.T, session string) string {
@@ -467,10 +456,6 @@ func TestRunDrift(t *testing.T) {
 	}
 }
 
-// A usage cache without a five-hour block still carries the limits: five_hour reads
-// null, the limits stay, and there is nothing to warn about. A five-hour block without
-// its number, or a cache without limits, stays an error: meters null and a warning
-// naming the missing key.
 func TestRunMeters(t *testing.T) {
 	const limits = `"limits": [{"kind": "weekly_all", "percent": 7, "resets_at": null}]`
 	path := writeSession(t, reply("m1", 500_000, 2_000))
@@ -486,7 +471,7 @@ func TestRunMeters(t *testing.T) {
 			if err := os.WriteFile(cache, []byte(c.cache), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			res := ccctxUsage(t, cache, "-window", "1000000", "-transcript", path)
+			res := ccctxWithUsageFile(t, cache, "-window", "1000000", "-transcript", path)
 			if res.code != exitOK {
 				t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
 			}
@@ -503,7 +488,7 @@ func TestRunMeters(t *testing.T) {
 				t.Errorf("meters %v, stderr:\n%s\nwant five_hour null, the weekly_all limit, no warning", values["meters"], res.stderr)
 			}
 
-			res = ccctxUsage(t, cache, "-plain", "-window", "1000000", "-transcript", path)
+			res = ccctxWithUsageFile(t, cache, "-plain", "-window", "1000000", "-transcript", path)
 			if strings.Contains(res.stdout, "five_hour") || !strings.Contains(res.stdout, "  weekly_all 7%") {
 				t.Errorf("-plain stdout:\n%s\nwant the weekly_all line and no five_hour line", res.stdout)
 			}
@@ -511,8 +496,7 @@ func TestRunMeters(t *testing.T) {
 	}
 }
 
-// A transcript is named by exactly one of a session id, -transcript and -latest. Two
-// at once is a mistake to report by name, never a silent choice of one.
+// Two selectors at once is a mistake to report by name, never a silent choice of one.
 func TestRunSelectors(t *testing.T) {
 	const id = "11111111-1111-1111-1111-111111111111"
 	projects := t.TempDir()
@@ -551,10 +535,6 @@ func TestRunSelectors(t *testing.T) {
 	}
 }
 
-// A usage block that cannot be read whole stops the run, and so do unusable lines after
-// the last counted reply, where a format change partway through a transcript would
-// leave the count at the last reply ccctx could read. Each message names the key or
-// the line.
 func TestRunUsageDrift(t *testing.T) {
 	renamed := strings.Replace(reply("m1", 500_000, 2_000), "cache_read_input_tokens", "cache_read_tokens", 1)
 	cases := []struct {
@@ -603,8 +583,6 @@ func TestRunUsageNoDrift(t *testing.T) {
 	}
 }
 
-// A last line with no newline after it is one Claude Code is still writing. It is
-// left out without a word, never counted as an unparseable line.
 func TestRunHalfWrittenLastLine(t *testing.T) {
 	path := writeTranscript(t, reply("m1", 500_000, 2_000)+"\n"+`{"type":"assistant","message":{"id":"m2","usa`)
 	res := ccctx(t, "-window", "1000000", "-transcript", path)

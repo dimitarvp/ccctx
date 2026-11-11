@@ -88,8 +88,7 @@ type entry struct {
 	} `json:"message"`
 }
 
-// usageBlock is "message"."usage" as written. The counts are pointers so a missing
-// key reads as missing, never as 0.
+// usageBlock holds its counts as pointers so a missing key reads as missing, never as 0.
 type usageBlock struct {
 	InputTokens         *int `json:"input_tokens"`
 	CacheReadTokens     *int `json:"cache_read_input_tokens"`
@@ -101,8 +100,6 @@ type usageBlock struct {
 // it is a misread.
 const maxCount = 1_000_000_000
 
-// counts returns the prompt side and the output of a usage block, or an error naming
-// the first key that is missing or out of range.
 func (u *usageBlock) counts() (prompt, output int, err error) {
 	for _, c := range []struct {
 		key string
@@ -132,21 +129,21 @@ type turn struct {
 // stats records what the scan actually saw, so a disappointing result can be
 // explained instead of guessed at.
 type stats struct {
-	lines            int
-	parseErrors      int
-	firstParseErrNo  int
-	firstParseErrMsg string
-	assistant        int
-	assistantNoUsage int
-	sidechain        int
-	synthetic        int
-	usable           int
-	zeroPrompt       int
-	zeroOutput       int
-	compactions      int
-	ccVersion        string
-	badUsage         string // the first usage block since the last compaction that counts() rejects
-	trailing         string // the first unusable line since the last counted entry or compaction
+	lines              int
+	parseErrors        int
+	firstParseErrNo    int
+	firstParseErrMsg   string
+	assistant          int
+	assistantNoUsage   int
+	sidechain          int
+	synthetic          int
+	usable             int
+	zeroPrompt         int
+	zeroOutput         int
+	compactions        int
+	ccVersion          string
+	badUsage           string
+	unusableAfterCount string
 }
 
 type sensor struct {
@@ -170,7 +167,7 @@ type report struct {
 	SessionID    string         `json:"session_id"`
 	Transcript   string         `json:"transcript"`
 	CCVersion    string         `json:"cc_version,omitempty"`
-	CountKnown   bool           `json:"count_known"` // false right after a compaction, until the next reply
+	CountKnown   bool           `json:"count_known"`
 	Current      int            `json:"current_tokens"`
 	HighWater    int            `json:"high_water_tokens"`
 	Model        string         `json:"model"`
@@ -183,9 +180,7 @@ type report struct {
 
 // usageCache is the part of the statusline's usage cache that the meters report: the
 // payload of Anthropic's OAuth usage endpoint, stored as fetched. The numbers are
-// pointers so a missing or renamed field is an error, never a reading of 0% used. A
-// null or absent five_hour is no error: the limits still stand, and the report
-// carries five_hour null.
+// pointers so a missing or renamed field is an error, never a reading of 0% used.
 type usageCache struct {
 	FiveHour *struct {
 		Utilization *float64 `json:"utilization"`
@@ -199,7 +194,7 @@ type usageCache struct {
 }
 
 // meters is the report's usage block. AgeSeconds is the cache file's age: how long
-// since the statusline last wrote it. FiveHour is null when the cache has none.
+// since the statusline last wrote it.
 type meters struct {
 	AgeSeconds int64   `json:"age_seconds"`
 	FiveHour   *meter  `json:"five_hour"`
@@ -328,9 +323,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// locate resolves which transcript to read from exactly one selector: an explicit
-// path, a session uuid searched across every project directory, or the newest
-// transcript on disk.
+// locate resolves which transcript to read.
 func locate(stderr io.Writer, explicit, projects, uuid string, latest bool) (path, sessionID string, err error) {
 	var given []string
 	if uuid != "" {
@@ -431,12 +424,10 @@ func scan(path string) ([]turn, stats, error) {
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1<<20), maxLine)
-	// A line with no newline after it at the end of the file is one Claude Code is
-	// still writing.
-	open := false
+	unterminated := false
 	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
 		advance, token, err := bufio.ScanLines(data, atEOF)
-		open = atEOF && bytes.IndexByte(data[:advance], '\n') < 0
+		unterminated = atEOF && bytes.IndexByte(data[:advance], '\n') < 0
 		return advance, token, err
 	})
 
@@ -451,14 +442,14 @@ func scan(path string) ([]turn, stats, error) {
 		}
 		var e entry
 		if err := json.Unmarshal(line, &e); err != nil {
-			if open {
-				continue
+			if unterminated {
+				continue // the last line, which Claude Code may still be writing
 			}
 			st.parseErrors++
 			if st.firstParseErrNo == 0 {
 				st.firstParseErrNo, st.firstParseErrMsg = st.lines, err.Error()
 			}
-			st.trailing = cmp.Or(st.trailing, fmt.Sprintf("line %d does not parse as JSON (%v)", st.lines, err))
+			st.unusableAfterCount = cmp.Or(st.unusableAfterCount, fmt.Sprintf("line %d does not parse as JSON (%v)", st.lines, err))
 			continue
 		}
 		if e.Version != "" {
@@ -468,7 +459,7 @@ func scan(path string) ([]turn, stats, error) {
 		if e.IsCompactSummary && !e.IsSidechain {
 			st.compactions++
 			byID, order = map[string]turn{}, nil // the window really did empty here
-			st.badUsage, st.trailing = "", ""
+			st.badUsage, st.unusableAfterCount = "", ""
 			continue
 		}
 		if e.Type != "assistant" {
@@ -488,7 +479,7 @@ func scan(path string) ([]turn, stats, error) {
 		}
 		if e.Message.Usage == nil {
 			st.assistantNoUsage++
-			st.trailing = cmp.Or(st.trailing, fmt.Sprintf(`line %d is an assistant entry without "message"."usage"`, st.lines))
+			st.unusableAfterCount = cmp.Or(st.unusableAfterCount, fmt.Sprintf(`line %d is an assistant entry without "message"."usage"`, st.lines))
 			continue
 		}
 		prompt, output, err := e.Message.Usage.counts()
@@ -497,7 +488,7 @@ func scan(path string) ([]turn, stats, error) {
 			continue
 		}
 		st.usable++
-		st.trailing = ""
+		st.unusableAfterCount = ""
 
 		if prompt == 0 {
 			st.zeroPrompt++
@@ -585,10 +576,10 @@ func verify(st *stats, path string) string {
 			"  Zero in every turn means that key was renamed — treating this as 0 would silently report the context short\n"+
 			"  by every reply's length, so it is a hard error instead.\n%s", st.usable, where)
 
-	case st.trailing != "":
+	case st.unusableAfterCount != "":
 		return fmt.Sprintf("%s, and no counted reply comes after it.\n"+
 			"  A format change partway through a transcript looks like this: the count would stay at the last\n"+
-			"  reply ccctx could read while the context grows.\n%s", st.trailing, where)
+			"  reply ccctx could read while the context grows.\n%s", st.unusableAfterCount, where)
 	}
 	return ""
 }
@@ -613,7 +604,6 @@ func warn(stderr io.Writer, st *stats, path string) {
 
 // summarize takes the high-water mark across turns. A forced model switch only ever
 // reads lower, so the peak recovers the true occupancy and errs toward triggering early.
-// With no turns, right after a compaction, the count is unknown and every number is 0.
 func summarize(turns []turn) report {
 	rep := report{CountKnown: len(turns) > 0, Turns: len(turns), PerModelPeak: map[string]int{}}
 	for _, t := range turns {
@@ -651,7 +641,6 @@ func judge(highWater, window, reserve, room int) judgment {
 // resolveWindow finds the context window size, which the transcript never records.
 // The statusline receives it from Claude Code and writes it to a sensor file, so the
 // size tracks whatever the model actually offers instead of a hardcoded constant.
-// Another session's sensor file is never read: it may describe another model's window.
 func resolveWindow(stderr io.Writer, explicit int, sensorPath string) (window int, source string) {
 	if explicit > 0 {
 		return explicit, "flag"
