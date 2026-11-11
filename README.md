@@ -59,8 +59,9 @@ Two corrections a naive reading needs:
 Right after a compaction, before the next reply, the transcript holds no
 count of the emptied window. ccctx then exits `0` with `count_known` false,
 `current_tokens`, `high_water_tokens` and `turns` at 0, and the limits
-judged on 0. `-plain` says the count is unknown until the next reply. Every
-other report has `count_known` true.
+judged on 0. `-plain` says the count is unknown until the next reply. The
+same holds for a transcript that opens with a compaction. Every other report
+has `count_known` true.
 
 Sidechain (subagent) entries, their compactions included, and `<synthetic>`
 placeholder entries are skipped.
@@ -112,7 +113,8 @@ ccctx exits `2` and says what it expected when the transcript has no
 parseable line, no assistant entry, or no usable entry (an assistant entry
 that is not skipped and has a usage block). It does the same when every
 usable entry has a prompt side of zero (the three prompt fields together),
-or an output of zero.
+or an output of zero. These whole-file checks wait while the count is
+unknown right after a compaction.
 
 Since the last compaction, every usage block must carry all four counts,
 each from 0 to 1,000,000,000. A missing key or a count out of range exits

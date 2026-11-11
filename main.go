@@ -33,7 +33,8 @@
 // between versions. Every read is therefore checked against what the format is
 // expected to contain: a transcript with no parseable line, no assistant entry, no
 // usage block, a prompt side of zero in every turn or an output of zero in every turn
-// exits DRIFT naming the JSON path that disappeared. Since the last compaction, every
+// exits DRIFT naming the JSON path that disappeared. Those whole-file checks wait while
+// the count is unknown right after a compaction. Since the last compaction, every
 // usage block must carry all four counts, each from 0 to 1,000,000,000, and no
 // unparseable line or assistant entry without usage may come after the last counted
 // reply; each breach exits DRIFT naming the key or the line. A last line with no
@@ -141,6 +142,7 @@ type stats struct {
 	zeroPrompt         int
 	zeroOutput         int
 	compactions        int
+	awaitingReply      bool // a compaction emptied the window and nothing has been counted since
 	ccVersion          string
 	badUsage           string
 	unusableAfterCount string
@@ -526,6 +528,7 @@ func scan(path string) ([]turn, stats, error) {
 		return nil, st, fmt.Errorf("failed reading transcript at line %d: %w", st.lines, err)
 	}
 
+	st.awaitingReply = st.compactions > 0 && len(order) == 0
 	turns := make([]turn, 0, len(order))
 	for _, id := range order {
 		turns = append(turns, byID[id])
@@ -549,6 +552,15 @@ func verify(st *stats, path string) string {
 			"  The transcript is expected to be JSON Lines, one object per line — that no longer holds.\n%s",
 			st.lines, st.firstParseErrNo, st.firstParseErrMsg, where)
 
+	case st.badUsage != "":
+		return fmt.Sprintf("%s.\n"+
+			"  Every assistant entry since the last compaction must carry all four counts, each from 0 to %d.\n"+
+			"  Read as 0, a missing count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
+
+	case st.awaitingReply:
+		// Right after a compaction no entry in the file decides the count, so the
+		// whole-file checks below have nothing to judge.
+
 	case st.assistant == 0:
 		return fmt.Sprintf("parsed %d lines but not one had \"type\":\"assistant\".\n"+
 			"  Context occupancy is only recorded on assistant entries, so either this session has no model replies\n"+
@@ -558,11 +570,6 @@ func verify(st *stats, path string) string {
 		return fmt.Sprintf("all %d assistant entries are sidechain (subagent) turns, so none describe the main conversation's context.\n"+
 			"  If this is a subagent-only transcript that is expected; otherwise \"isSidechain\" may have changed meaning.\n%s",
 			st.sidechain, where)
-
-	case st.badUsage != "":
-		return fmt.Sprintf("%s.\n"+
-			"  Every assistant entry since the last compaction must carry all four counts, each from 0 to %d.\n"+
-			"  Read as 0, a missing count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
 
 	case st.usable == 0:
 		return fmt.Sprintf("found %d assistant entries but none usable (%d lacked \"message\".\"usage\", %d sidechain, %d synthetic placeholders).\n"+
@@ -580,8 +587,8 @@ func verify(st *stats, path string) string {
 			"  Expected an integer field \"message\".\"usage\".\"output_tokens\": every reply has output, and it stays in the context.\n"+
 			"  Zero in every turn means that key was renamed — treating this as 0 would silently report the context short\n"+
 			"  by every reply's length, so it is a hard error instead.\n%s", st.usable, where)
-
-	case st.unusableAfterCount != "":
+	}
+	if st.unusableAfterCount != "" {
 		return fmt.Sprintf("%s, and no counted reply comes after it.\n"+
 			"  A format change partway through a transcript looks like this: the count would stay at the last\n"+
 			"  reply ccctx could read while the context grows.\n%s", st.unusableAfterCount, where)
