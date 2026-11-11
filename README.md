@@ -102,6 +102,9 @@ or an output of zero, which is what renamed keys look like. Not caught yet:
 a single renamed prompt field, or a format change that begins partway
 through a transcript, reads low without an error.
 
+One exit `2` is expected: right after a compaction, before the first reply,
+the transcript holds no turn to measure. It passes with the next reply.
+
 ## Use as a Stop hook
 
 A Stop hook runs ccctx when a turn ends and, from the checkpoint line on,
