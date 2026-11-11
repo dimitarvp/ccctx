@@ -23,7 +23,9 @@ exit `1` naming both.
 
 The report ends with `meters` from `~/.cache/claude_usage_limits.json` (override:
 `CCCTX_USAGE_FILE`): the five-hour window, each `.limits[]` entry and the file's
-age in seconds. A missing or malformed file gives `null`; the exit code ignores it.
+age in seconds. A missing or malformed file gives `null` and a warning; the
+exit code ignores it. A file without a five-hour block gives
+`"five_hour": null` and keeps the limits, with no warning.
 
 Exit codes: `0` under the checkpoint line, `10` at or over it, `2` format
 drift, `1` bad invocation or unreadable file. See `-h` for `-window`,

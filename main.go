@@ -183,7 +183,9 @@ type report struct {
 
 // usageCache is the part of the statusline's usage cache that the meters report: the
 // payload of Anthropic's OAuth usage endpoint, stored as fetched. The numbers are
-// pointers so a missing or renamed field is an error, never a reading of 0% used.
+// pointers so a missing or renamed field is an error, never a reading of 0% used. A
+// null or absent five_hour is no error: the limits still stand, and the report
+// carries five_hour null.
 type usageCache struct {
 	FiveHour *struct {
 		Utilization *float64 `json:"utilization"`
@@ -197,10 +199,10 @@ type usageCache struct {
 }
 
 // meters is the report's usage block. AgeSeconds is the cache file's age: how long
-// since the statusline last wrote it.
+// since the statusline last wrote it. FiveHour is null when the cache has none.
 type meters struct {
 	AgeSeconds int64   `json:"age_seconds"`
-	FiveHour   meter   `json:"five_hour"`
+	FiveHour   *meter  `json:"five_hour"`
 	Limits     []meter `json:"limits"`
 }
 
@@ -702,7 +704,7 @@ func readMeters(path string, now time.Time) (*meters, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("cannot parse %s: %w", path, err)
 	}
-	if c.FiveHour == nil || c.FiveHour.Utilization == nil {
+	if c.FiveHour != nil && c.FiveHour.Utilization == nil {
 		return nil, fmt.Errorf("%s has no .five_hour.utilization", path)
 	}
 	if c.Limits == nil {
@@ -710,8 +712,10 @@ func readMeters(path string, now time.Time) (*meters, error) {
 	}
 	m := &meters{
 		AgeSeconds: int64(now.Sub(fi.ModTime()) / time.Second),
-		FiveHour:   meter{Percent: *c.FiveHour.Utilization, ResetsAt: c.FiveHour.ResetsAt},
 		Limits:     make([]meter, 0, len(c.Limits)),
+	}
+	if c.FiveHour != nil {
+		m.FiveHour = &meter{Percent: *c.FiveHour.Utilization, ResetsAt: c.FiveHour.ResetsAt}
 	}
 	for i, l := range c.Limits {
 		switch {
@@ -748,7 +752,9 @@ func metersText(m *meters) string {
 		}
 		b.WriteByte('\n')
 	}
-	line("five_hour", m.FiveHour)
+	if m.FiveHour != nil {
+		line("five_hour", *m.FiveHour)
+	}
 	for _, l := range m.Limits {
 		line(l.Kind, l)
 	}
