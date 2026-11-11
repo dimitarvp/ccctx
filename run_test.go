@@ -21,7 +21,13 @@ type result struct {
 // directory and the meters fixture, so nothing on the machine is read.
 func ccctx(t *testing.T, args ...string) result {
 	t.Helper()
-	t.Setenv("CCCTX_USAGE_FILE", filepath.Join("testdata", "claude_usage_limits.json"))
+	return ccctxUsage(t, filepath.Join("testdata", "claude_usage_limits.json"), args...)
+}
+
+// ccctxUsage is ccctx with the meters read from the given usage cache.
+func ccctxUsage(t *testing.T, usageFile string, args ...string) result {
+	t.Helper()
+	t.Setenv("CCCTX_USAGE_FILE", usageFile)
 	var stdout, stderr bytes.Buffer
 	code := run(append([]string{"-sensor-dir", t.TempDir(), "-projects", t.TempDir()}, args...), &stdout, &stderr)
 	return result{code, stdout.String(), stderr.String()}
@@ -436,6 +442,50 @@ func TestRunDrift(t *testing.T) {
 			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
 			if res.code != exitDrift || res.stdout != "" || !strings.Contains(res.stderr, c.key) {
 				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d naming %s", res.code, res.stdout, res.stderr, exitDrift, c.key)
+			}
+		})
+	}
+}
+
+// A usage cache without a five-hour block still carries the limits: five_hour reads
+// null, the limits stay, and there is nothing to warn about. A five-hour block without
+// its number, or a cache without limits, stays an error: meters null and a warning
+// naming the missing key.
+func TestRunMeters(t *testing.T) {
+	const limits = `"limits": [{"kind": "weekly_all", "percent": 7, "resets_at": null}]`
+	path := writeSession(t, reply("m1", 500_000, 2_000))
+	cases := []struct{ name, cache, warning string }{
+		{"five_hour null", `{"five_hour": null, ` + limits + `}`, ""},
+		{"five_hour absent", `{` + limits + `}`, ""},
+		{"five_hour without utilization", `{"five_hour": {"resets_at": null}, ` + limits + `}`, ".five_hour.utilization"},
+		{"no limits", `{"five_hour": null}`, ".limits"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cache := filepath.Join(t.TempDir(), "usage.json")
+			if err := os.WriteFile(cache, []byte(c.cache), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			res := ccctxUsage(t, cache, "-window", "1000000", "-transcript", path)
+			if res.code != exitOK {
+				t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+			}
+			_, values := decodeReport(t, res.stdout)
+			if c.warning != "" {
+				if values["meters"] != nil || !strings.Contains(res.stderr, c.warning) {
+					t.Errorf("meters %v, stderr:\n%s\nwant meters null and a warning naming %s", values["meters"], res.stderr, c.warning)
+				}
+				return
+			}
+			m, _ := values["meters"].(map[string]any)
+			five, present := m["five_hour"]
+			if !present || five != nil || fmt.Sprint(m["limits"]) != "[map[kind:weekly_all percent:7 resets_at:<nil>]]" || res.stderr != "" {
+				t.Errorf("meters %v, stderr:\n%s\nwant five_hour null, the weekly_all limit, no warning", values["meters"], res.stderr)
+			}
+
+			res = ccctxUsage(t, cache, "-plain", "-window", "1000000", "-transcript", path)
+			if strings.Contains(res.stdout, "five_hour") || !strings.Contains(res.stdout, "  weekly_all 7%") {
+				t.Errorf("-plain stdout:\n%s\nwant the weekly_all line and no five_hour line", res.stdout)
 			}
 		})
 	}

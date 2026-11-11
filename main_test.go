@@ -99,7 +99,6 @@ func TestReadMetersMalformed(t *testing.T) {
 	const fiveHour = `"five_hour": {"utilization": 3.0, "resets_at": null}`
 	cases := []struct{ name, body, wantErr string }{
 		{"truncated", `{"five_hour": `, "cannot parse"},
-		{"no five_hour", `{"limits": []}`, "has no .five_hour.utilization"},
 		{"null utilization", `{"five_hour": {"utilization": null}, "limits": []}`, "has no .five_hour.utilization"},
 		{"no limits", `{` + fiveHour + `}`, "has no .limits"},
 		{"limit without kind", `{` + fiveHour + `, "limits": [{"percent": 1, "resets_at": null}]}`, "has no .limits[0].kind"},
