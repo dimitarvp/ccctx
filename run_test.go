@@ -280,6 +280,35 @@ func TestRunNoWindow(t *testing.T) {
 	}
 }
 
+// A session is judged on its own window only: the flag, else its own sensor file.
+// Another session's file may describe another model, so it is never used, and the
+// first line of stderr names the flag that supplies the size.
+func TestRunWindowSource(t *testing.T) {
+	path := writeSession(t, reply("m1", 500_000, 2_000))
+	sensorDir := func(t *testing.T, session string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, session+".json"), []byte(`{"window":1000000}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	res := ccctx(t, "-sensor-dir", sensorDir(t, "session"), "-transcript", path)
+	if res.code != exitOK {
+		t.Fatalf("own sensor file: exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+	}
+	_, values := decodeReport(t, res.stdout)
+	checkValues(t, values, map[string]string{"window_tokens": "1000000", "window_source": "sensor"})
+
+	res = ccctx(t, "-sensor-dir", sensorDir(t, "another-session"), "-transcript", path)
+	first, _, _ := strings.Cut(res.stderr, "\n")
+	if res.code != exitDrift || res.stdout != "" || !strings.Contains(first, "-window <tokens>") {
+		t.Errorf("another session's sensor file: exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, a first line naming -window <tokens>",
+			res.code, res.stdout, res.stderr, exitDrift)
+	}
+}
+
 func TestRunBadInvocation(t *testing.T) {
 	path := writeSession(t, reply("m1", 500_000, 2_000))
 	cases := []struct {
