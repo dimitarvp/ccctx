@@ -16,8 +16,10 @@
 //     it would report a peak that no longer exists.
 //
 // The window size is not in the transcript. Claude Code only reports it on the
-// statusline's stdin, so -window takes it from a sensor file the statusline writes;
-// without one there are no limits to judge against and ccctx exits DRIFT.
+// statusline's stdin, so ccctx reads it from the sensor file the statusline writes for
+// the same session, or takes -window. Another session's file is never used: it may
+// describe another model. Without a window size there are no limits to judge against
+// and ccctx exits 2.
 //
 // The window itself is never the limit. Claude Code keeps back a reserve for its own
 // compaction and forces one at the window minus that reserve: 966,000 on a 1,000,000
@@ -47,7 +49,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -56,7 +57,7 @@ import (
 const (
 	exitOK    = 0  // under the checkpoint line
 	exitFail  = 1  // bad invocation, unreadable file
-	exitDrift = 2  // transcript read but did not contain what it must
+	exitDrift = 2  // transcript read but did not contain what it must, or no window size known
 	exitOver  = 10 // at or over the checkpoint line
 )
 
@@ -183,7 +184,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		projects   = flags.String("projects", filepath.Join(home(), ".claude", "projects"), "Claude Code projects directory")
 		transcript = flags.String("transcript", "", "explicit transcript path (skips session lookup)")
 		latest     = flags.Bool("latest", false, "use the most recently modified transcript")
-		window     = flags.Int("window", 0, "context window size in tokens (0 = read sensor file)")
+		window     = flags.Int("window", 0, "context window size in tokens (0 = read this session's sensor file)")
 		sensorDir  = flags.String("sensor-dir", filepath.Join(home(), ".cache", "claude_ctx"), "directory of statusline-written sensor files")
 		plain      = flags.Bool("plain", false, "print the token count, the limits, then the usage meters, as text instead of JSON")
 		noThresh   = flags.Bool("no-threshold", false, "stop requiring a window size: without one, report occupancy alone; with one, judge the limits as usual, so exit 10 stays possible")
@@ -198,7 +199,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			"Exit codes:\n"+
 			"  0   under the checkpoint line\n"+
 			"  10  at or over the checkpoint line\n"+
-			"  2   DRIFT: the transcript did not contain what it must (see stderr)\n"+
+			"  2   DRIFT: the transcript did not contain what it must, or no window size is known (see stderr)\n"+
 			"  1   bad invocation or unreadable file\n\n")
 		flags.PrintDefaults()
 	}
@@ -242,7 +243,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rep.SessionID, rep.Transcript = sessionID, path
 	rep.Compactions, rep.CCVersion = st.compactions, st.ccVersion
 
-	windowSize, source := resolveWindow(stderr, *window, *sensorDir, sessionID)
+	sensorPath := filepath.Join(*sensorDir, sessionID+".json")
+	windowSize, source := resolveWindow(stderr, *window, sensorPath)
 	switch {
 	case windowSize > 0:
 		// Subtracting rather than adding, so huge flag values cannot overflow into a pass.
@@ -255,15 +257,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		j.WindowSource = source
 		rep.judgment = &j
 	case !*noThresh:
-		drift(stderr, fmt.Sprintf("no context window size available, so %d tokens cannot be judged against the checkpoint line.\n"+
+		// Callers may show only the first line, so that line names the way out.
+		failf(stderr, "no context window size available for session %s; pass -window <tokens>\n"+
+			"  Without it, %d tokens cannot be judged against the checkpoint line.\n"+
 			"  Claude Code reveals the window size ONLY on the statusline's stdin (.context_window.context_window_size);\n"+
-			"  it is never written to the transcript.\n"+
-			"  Fix by either:\n"+
-			"    - having the statusline write %s/<session-id>.json containing {\"window\": <tokens>}\n"+
-			"    - passing -window <tokens> explicitly\n"+
-			"    - passing -no-threshold, which stops requiring a window size: without one, occupancy is reported\n"+
+			"  it is never written to the transcript. Other ways out:\n"+
+			"    - have the statusline write %s containing {\"window\": <tokens>}\n"+
+			"    - pass -no-threshold, which stops requiring a window size: without one, occupancy is reported\n"+
 			"      alone; with one, the limits are judged as usual and exit 10 stays possible",
-			rep.HighWater, *sensorDir))
+			sessionID, rep.HighWater, sensorPath)
 		return exitDrift
 	}
 
@@ -562,49 +564,34 @@ func judge(highWater, window, reserve, room int) judgment {
 // resolveWindow finds the context window size, which the transcript never records.
 // The statusline receives it from Claude Code and writes it to a sensor file, so the
 // size tracks whatever the model actually offers instead of a hardcoded constant.
-func resolveWindow(stderr io.Writer, explicit int, sensorDir, sessionID string) (window int, source string) {
+// Another session's sensor file is never read: it may describe another model's window.
+func resolveWindow(stderr io.Writer, explicit int, sensorPath string) (window int, source string) {
 	if explicit > 0 {
 		return explicit, "flag"
 	}
-	own := filepath.Join(sensorDir, sessionID+".json")
-	if w, ok := readSensor(stderr, own, true); ok {
+	if w, ok := readSensor(stderr, sensorPath); ok {
 		return w, "sensor"
-	}
-	globbed, _ := filepath.Glob(filepath.Join(sensorDir, "*.json"))
-	sort.Strings(globbed)
-	for _, c := range globbed {
-		if c == own {
-			continue
-		}
-		if w, ok := readSensor(stderr, c, false); ok {
-			_, _ = fmt.Fprintf(stderr, "ccctx warning: no sensor file for this session (%s); using window size from %s instead\n", own, c)
-			return w, "sensor(other-session)"
-		}
 	}
 	return 0, ""
 }
 
 // readSensor reads one sensor file. A sensor that exists but cannot be used is
 // reported loudly, since silently ignoring it is how a limit stops being checked.
-func readSensor(stderr io.Writer, path string, complain bool) (int, bool) {
+func readSensor(stderr io.Writer, path string) (int, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		if complain && !os.IsNotExist(err) {
+		if !os.IsNotExist(err) {
 			_, _ = fmt.Fprintf(stderr, "ccctx warning: cannot read sensor file %s: %v\n", path, err)
 		}
 		return 0, false
 	}
 	var s sensor
 	if err := json.Unmarshal(b, &s); err != nil {
-		if complain {
-			_, _ = fmt.Fprintf(stderr, "ccctx warning: sensor file %s is not valid JSON: %v\n", path, err)
-		}
+		_, _ = fmt.Fprintf(stderr, "ccctx warning: sensor file %s is not valid JSON: %v\n", path, err)
 		return 0, false
 	}
 	if s.Window <= 0 {
-		if complain {
-			_, _ = fmt.Fprintf(stderr, "ccctx warning: sensor file %s has no usable \"window\" value (got %d)\n", path, s.Window)
-		}
+		_, _ = fmt.Fprintf(stderr, "ccctx warning: sensor file %s has no usable \"window\" value (got %d)\n", path, s.Window)
 		return 0, false
 	}
 	return s.Window, true

@@ -60,12 +60,12 @@ on the statusline's stdin, so a statusline script writes it to a sensor file:
 ~/.cache/claude_ctx/<session-id>.json    {"window": 1000000, ...}
 ```
 
-ccctx reads that, or takes `-window <tokens>`. Without a usable sensor file
-of its own, it takes the window from another session's file (the first
-usable one by name) and warns on stderr. Only with no usable sensor file at
-all does it exit `2` and say how to supply one, or, under `-no-threshold`,
-report without limits. Reading it live means a larger window on a future
-model moves both limits with no edits.
+ccctx reads the session's own file, or takes `-window <tokens>`. It never
+uses another session's file, which may describe another model. Without a
+window size it exits `2`, and the first line of stderr names `-window
+<tokens>`; under `-no-threshold` it reports without limits instead.
+Reading it live means a larger window on a future model moves both limits
+with no edits.
 
 ## The two limits
 
