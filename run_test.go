@@ -312,10 +312,12 @@ func TestRunAfterCompaction(t *testing.T) {
 	})
 	checkInvariant(t, values)
 
+	// A reader of -plain may go by line position, so the words come last.
 	res = ccctx(t, "-plain", "-window", "1000000", "-transcript", path)
-	lines := strings.SplitN(res.stdout, "\n", 3)
-	if res.code != exitOK || len(lines) != 3 || lines[0] != "0" || !strings.Contains(lines[1], "unknown until the next reply") {
-		t.Errorf("-plain: exit %d, stdout:\n%s\nwant exit %d, then 0, then a line saying the count is unknown until the next reply",
+	lines := strings.Split(strings.TrimSuffix(res.stdout, "\n"), "\n")
+	if res.code != exitOK || len(lines) < 3 || lines[0] != "0" || !strings.HasPrefix(lines[1], "limits: checkpoint line") ||
+		!strings.Contains(lines[len(lines)-1], "count unknown until the next reply") {
+		t.Errorf("-plain: exit %d, stdout:\n%s\nwant exit %d, then 0, then the limits, and last a line saying the count is unknown until the next reply",
 			res.code, res.stdout, exitOK)
 	}
 }
