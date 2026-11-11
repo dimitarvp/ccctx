@@ -207,6 +207,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return exitFail // the flag package has already printed the error and the usage
 	}
+	if *window < 0 || *reserve < 0 || *room < 0 {
+		failf(stderr, "-window (%d), -compaction-reserve (%d) and -checkpoint-room (%d) are token counts and cannot be negative",
+			*window, *reserve, *room)
+		return exitFail
+	}
 
 	path, sessionID, err := locate(stderr, *transcript, *projects, flags.Arg(0), *latest)
 	if err != nil {
@@ -233,8 +238,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch {
 	case windowSize > 0:
 		// Subtracting rather than adding, so huge flag values cannot overflow into a pass.
-		if *reserve < 0 || *room < 0 || windowSize-*reserve <= *room {
-			failf(stderr, "a window of %d tokens must be larger than the compaction reserve (%d) plus the checkpoint room (%d), and neither may be negative",
+		if windowSize-*reserve <= *room {
+			failf(stderr, "a window of %d tokens must be larger than the compaction reserve (%d) plus the checkpoint room (%d)",
 				windowSize, *reserve, *room)
 			return exitFail
 		}

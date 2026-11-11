@@ -268,6 +268,8 @@ func TestRunBadInvocation(t *testing.T) {
 		{"window equal to reserve plus room", []string{"-window", "64000", "-transcript", path}, exitFail, []string{"64000", "34000", "30000"}},
 		{"negative checkpoint room", []string{"-window", "1000000", "-checkpoint-room", "-1", "-transcript", path}, exitFail, []string{"1000000", "34000", "(-1)"}},
 		{"negative compaction reserve", []string{"-window", "1000000", "-compaction-reserve", "-5", "-transcript", path}, exitFail, []string{"1000000", "(-5)", "30000"}},
+		{"negative window", []string{"-window", "-5", "-transcript", path}, exitFail, []string{"-window (-5)"}},
+		{"negative checkpoint room with no window to judge", []string{"-no-threshold", "-checkpoint-room", "-1", "-transcript", path}, exitFail, []string{"-checkpoint-room (-1)"}},
 		{"missing transcript", []string{"-transcript", filepath.Join(t.TempDir(), "absent.jsonl")}, exitFail, []string{"cannot read transcript"}},
 		{"help", []string{"-h"}, exitOK, []string{"usage: ccctx", "-checkpoint-room"}},
 	}
