@@ -31,7 +31,11 @@
 // between versions. Every read is therefore checked against what the format is
 // expected to contain: a transcript with no parseable line, no assistant entry, no
 // usage block, a prompt side of zero in every turn or an output of zero in every turn
-// exits DRIFT naming the JSON path that disappeared.
+// exits DRIFT naming the JSON path that disappeared. Since the last compaction, every
+// usage block must carry all four counts, each from 0 to 1,000,000,000, and no
+// unparseable line or assistant entry without usage may come after the last counted
+// reply; each breach exits DRIFT naming the key or the line. A last line with no
+// newline after it is still being written and is left out.
 //
 // The report also carries the account's usage meters, read from the cache the
 // statusline keeps of Anthropic's usage endpoint, so one command shows both how full
@@ -41,6 +45,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -75,15 +80,45 @@ type entry struct {
 	Timestamp        string `json:"timestamp"`
 	Version          string `json:"version"`
 	Message          struct {
-		ID    string `json:"id"`
-		Model string `json:"model"`
-		Usage *struct {
-			InputTokens         int `json:"input_tokens"`
-			CacheReadTokens     int `json:"cache_read_input_tokens"`
-			CacheCreationTokens int `json:"cache_creation_input_tokens"`
-			OutputTokens        int `json:"output_tokens"`
-		} `json:"usage"`
+		ID    string      `json:"id"`
+		Model string      `json:"model"`
+		Usage *usageBlock `json:"usage"`
 	} `json:"message"`
+}
+
+// usageBlock is "message"."usage" as written. The counts are pointers so a missing
+// key reads as missing, never as 0.
+type usageBlock struct {
+	InputTokens         *int `json:"input_tokens"`
+	CacheReadTokens     *int `json:"cache_read_input_tokens"`
+	CacheCreationTokens *int `json:"cache_creation_input_tokens"`
+	OutputTokens        *int `json:"output_tokens"`
+}
+
+// maxCount bounds one usage count. No context window comes near it, so a count past
+// it is a misread.
+const maxCount = 1_000_000_000
+
+// counts returns the prompt side and the output of a usage block, or an error naming
+// the first key that is missing or out of range.
+func (u *usageBlock) counts() (prompt, output int, err error) {
+	for _, c := range []struct {
+		key string
+		n   *int
+	}{
+		{"input_tokens", u.InputTokens},
+		{"cache_read_input_tokens", u.CacheReadTokens},
+		{"cache_creation_input_tokens", u.CacheCreationTokens},
+		{"output_tokens", u.OutputTokens},
+	} {
+		switch {
+		case c.n == nil:
+			return 0, 0, fmt.Errorf(`"message"."usage" has no %q`, c.key)
+		case *c.n < 0 || *c.n > maxCount:
+			return 0, 0, fmt.Errorf(`"message"."usage".%q is %d, outside 0 to %d`, c.key, *c.n, maxCount)
+		}
+	}
+	return *u.InputTokens + *u.CacheReadTokens + *u.CacheCreationTokens, *u.OutputTokens, nil
 }
 
 type turn struct {
@@ -108,6 +143,8 @@ type stats struct {
 	zeroOutput       int
 	compactions      int
 	ccVersion        string
+	badUsage         string // the first usage block since the last compaction that counts() rejects
+	trailing         string // the first unusable line since the last counted entry or compaction
 }
 
 type sensor struct {
@@ -371,6 +408,14 @@ func scan(path string) ([]turn, stats, error) {
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1<<20), maxLine)
+	// A line with no newline after it at the end of the file is one Claude Code is
+	// still writing.
+	open := false
+	sc.Split(func(data []byte, atEOF bool) (int, []byte, error) {
+		advance, token, err := bufio.ScanLines(data, atEOF)
+		open = atEOF && bytes.IndexByte(data[:advance], '\n') < 0
+		return advance, token, err
+	})
 
 	byID := map[string]turn{}
 	order := []string{}
@@ -383,10 +428,14 @@ func scan(path string) ([]turn, stats, error) {
 		}
 		var e entry
 		if err := json.Unmarshal(line, &e); err != nil {
+			if open {
+				continue
+			}
 			st.parseErrors++
 			if st.firstParseErrNo == 0 {
 				st.firstParseErrNo, st.firstParseErrMsg = st.lines, err.Error()
 			}
+			st.trailing = cmp.Or(st.trailing, fmt.Sprintf("line %d does not parse as JSON (%v)", st.lines, err))
 			continue
 		}
 		if e.Version != "" {
@@ -396,6 +445,7 @@ func scan(path string) ([]turn, stats, error) {
 		if e.IsCompactSummary && !e.IsSidechain {
 			st.compactions++
 			byID, order = map[string]turn{}, nil // the window really did empty here
+			st.badUsage, st.trailing = "", ""
 			continue
 		}
 		if e.Type != "assistant" {
@@ -415,20 +465,25 @@ func scan(path string) ([]turn, stats, error) {
 		}
 		if e.Message.Usage == nil {
 			st.assistantNoUsage++
+			st.trailing = cmp.Or(st.trailing, fmt.Sprintf(`line %d is an assistant entry without "message"."usage"`, st.lines))
+			continue
+		}
+		prompt, output, err := e.Message.Usage.counts()
+		if err != nil {
+			st.badUsage = cmp.Or(st.badUsage, fmt.Sprintf("line %d: %v", st.lines, err))
 			continue
 		}
 		st.usable++
+		st.trailing = ""
 
-		u := e.Message.Usage
-		prompt := u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens
 		if prompt == 0 {
 			st.zeroPrompt++
 		}
-		if u.OutputTokens == 0 {
+		if output == 0 {
 			st.zeroOutput++
 		}
 		t := turn{
-			ctx:   prompt + u.OutputTokens,
+			ctx:   prompt + output,
 			model: e.Message.Model,
 			ts:    e.Timestamp,
 		}
@@ -485,6 +540,11 @@ func verify(turns []turn, st *stats, path string) string {
 			"  If this is a subagent-only transcript that is expected; otherwise \"isSidechain\" may have changed meaning.\n%s",
 			st.sidechain, where)
 
+	case st.badUsage != "":
+		return fmt.Sprintf("%s.\n"+
+			"  Every assistant entry since the last compaction must carry all four counts, each from 0 to %d.\n"+
+			"  Read as 0, a missing count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
+
 	case st.usable == 0:
 		return fmt.Sprintf("found %d assistant entries but none usable (%d lacked \"message\".\"usage\", %d sidechain, %d synthetic placeholders).\n"+
 			"  The usage block is where token counts live; without it there is no context number to report.\n%s",
@@ -501,6 +561,11 @@ func verify(turns []turn, st *stats, path string) string {
 			"  Expected an integer field \"message\".\"usage\".\"output_tokens\": every reply has output, and it stays in the context.\n"+
 			"  Zero in every turn means that key was renamed — treating this as 0 would silently report the context short\n"+
 			"  by every reply's length, so it is a hard error instead.\n%s", st.usable, where)
+
+	case st.trailing != "":
+		return fmt.Sprintf("%s, and no counted reply comes after it.\n"+
+			"  A format change partway through a transcript looks like this: the count would stay at the last\n"+
+			"  reply ccctx could read while the context grows.\n%s", st.trailing, where)
 
 	case len(turns) == 0:
 		return fmt.Sprintf("no turns survived after the last of %d compaction boundaries.\n"+
