@@ -320,6 +320,42 @@ func TestRunAfterCompaction(t *testing.T) {
 	}
 }
 
+// A transcript can open with a compaction. Until the first reply after it the count is
+// unknown, whatever else stands in the file that cannot be counted.
+func TestRunOpensWithCompaction(t *testing.T) {
+	synthetic := strings.Replace(assistant("m2", 0, 0, 0, 0), "claude-test", "<synthetic>", 1)
+	cases := []struct {
+		name    string
+		entries []string
+	}{
+		{"the compaction alone", []string{compaction}},
+		{"lines that are not replies, then the compaction", []string{
+			`{"type":"custom-title","customTitle":"t"}`,
+			`{"type":"system","timestamp":"2026-01-01T00:00:00Z","content":"c"}`,
+			compaction,
+		}},
+		{"a user entry after it", []string{compaction, `{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"hi"}}`}},
+		{"a subagent reply after it", []string{compaction, sidechain(reply("s1", 20_000, 500))}},
+		{"a placeholder entry after it", []string{compaction, synthetic}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
+			if res.code != exitOK {
+				t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+			}
+			_, values := decodeReport(t, res.stdout)
+			checkValues(t, values, map[string]string{
+				"count_known":       "false",
+				"current_tokens":    "0",
+				"high_water_tokens": "0",
+				"turns":             "0",
+				"compactions":       "1",
+			})
+		})
+	}
+}
+
 // Without a window size there is nothing to judge: -no-threshold reports occupancy
 // alone, with none of the limit fields, and without it the missing size is drift.
 func TestRunNoWindow(t *testing.T) {
@@ -590,6 +626,8 @@ func TestRunUsageDrift(t *testing.T) {
 		{"no usage after the last counted reply", "line 2", []string{reply("m1", 500_000, 2_000), noUsage}},
 		{"an unparseable line after the last counted reply", "line 2", []string{reply("m1", 500_000, 2_000), "{this is not json}"}},
 		{"no usage after a compaction, nothing counted since", "line 3", []string{reply("m1", 500_000, 2_000), compaction, noUsage}},
+		{"no usage after an opening compaction", "line 2", []string{compaction, noUsage}},
+		{"a renamed key after an opening compaction", `"cache_read_input_tokens"`, []string{compaction, renamed}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
