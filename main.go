@@ -1,8 +1,10 @@
 // ccctx reports how full a Claude Code conversation's context window is.
 //
 // The number comes from the session transcript: each assistant turn records the
-// usage of the prompt Claude Code sent, so context occupancy is
-// input_tokens + cache_read_input_tokens + cache_creation_input_tokens.
+// usage of the prompt Claude Code sent and of the reply, so context occupancy is
+// input_tokens + cache_read_input_tokens + cache_creation_input_tokens + output_tokens.
+// The reply counts because the next prompt carries it, and Claude Code's own
+// compaction check adds it too.
 //
 // Two things make a naive "read the last turn" wrong:
 //
@@ -94,7 +96,8 @@ type stats struct {
 	sidechain        int
 	synthetic        int
 	usable           int
-	zeroCtx          int
+	zeroPrompt       int
+	zeroOutput       int
 	compactions      int
 	ccVersion        string
 }
@@ -382,13 +385,17 @@ func scan(path string) ([]turn, stats, error) {
 		st.usable++
 
 		u := e.Message.Usage
+		prompt := u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens
+		if prompt == 0 {
+			st.zeroPrompt++
+		}
+		if u.OutputTokens == 0 {
+			st.zeroOutput++
+		}
 		t := turn{
-			ctx:   u.InputTokens + u.CacheReadTokens + u.CacheCreationTokens,
+			ctx:   prompt + u.OutputTokens,
 			model: e.Message.Model,
 			ts:    e.Timestamp,
-		}
-		if t.ctx == 0 {
-			st.zeroCtx++
 		}
 		id := e.Message.ID
 		if id == "" {
@@ -448,11 +455,17 @@ func verify(turns []turn, st *stats, path string) string {
 			"  The usage block is where token counts live; without it there is no context number to report.\n%s",
 			st.assistant, st.assistantNoUsage, st.sidechain, st.synthetic, where)
 
-	case st.zeroCtx == st.usable:
-		return fmt.Sprintf("all %d usable turns computed a context of 0 tokens.\n"+
+	case st.zeroPrompt == st.usable:
+		return fmt.Sprintf("all %d usable turns reported a prompt of 0 tokens.\n"+
 			"  Expected integer fields inside \"message\".\"usage\": \"input_tokens\", \"cache_read_input_tokens\", \"cache_creation_input_tokens\".\n"+
 			"  A usage block that exists but sums to zero means those keys were renamed — treating this as 0 would silently\n"+
 			"  report an empty context window forever, so it is a hard error instead.\n%s", st.usable, where)
+
+	case st.zeroOutput == st.usable:
+		return fmt.Sprintf("all %d usable turns reported 0 output tokens.\n"+
+			"  Expected an integer field \"message\".\"usage\".\"output_tokens\": every reply has output, and it stays in the context.\n"+
+			"  Zero in every turn means that key was renamed — treating this as 0 would silently report the context short\n"+
+			"  by every reply's length, so it is a hard error instead.\n%s", st.usable, where)
 
 	case len(turns) == 0:
 		return fmt.Sprintf("no turns survived after the last of %d compaction boundaries.\n"+
@@ -469,9 +482,9 @@ func warn(stderr io.Writer, st *stats, path string) {
 			"  first was line %d: %s\n",
 			st.parseErrors, st.lines, path, st.firstParseErrNo, st.firstParseErrMsg)
 	}
-	if st.zeroCtx > 0 && st.zeroCtx < st.usable {
-		_, _ = fmt.Fprintf(stderr, "ccctx warning: %d of %d turns computed 0 tokens of context; expected every assistant turn to report usage\n",
-			st.zeroCtx, st.usable)
+	if st.zeroPrompt > 0 && st.zeroPrompt < st.usable {
+		_, _ = fmt.Fprintf(stderr, "ccctx warning: %d of %d turns reported a prompt of 0 tokens; expected every assistant turn to report usage\n",
+			st.zeroPrompt, st.usable)
 	}
 	if st.usable > 0 && st.assistantNoUsage > st.usable {
 		_, _ = fmt.Fprintf(stderr, "ccctx warning: %d assistant entries lacked \"message\".\"usage\" versus %d that had it\n",

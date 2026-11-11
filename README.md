@@ -29,9 +29,15 @@ Exit codes: `0` under the threshold, `10` at or over it, `2` format drift,
 ## Where the number comes from
 
 Each assistant turn in the transcript records the usage of the prompt Claude
-Code sent: `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`.
-The number is read from disk, not fetched, so it is accurate even for a
-resumed session that has made no request yet.
+Code sent and of the reply it got:
+
+```
+input_tokens + cache_read_input_tokens + cache_creation_input_tokens + output_tokens
+```
+
+The reply counts because the next prompt carries it, and Claude Code's own
+compaction check adds it too. The number is read from disk, not fetched, so it
+is accurate even for a resumed session that has made no request yet.
 
 Two corrections a naive reading needs:
 
@@ -62,6 +68,8 @@ The transcript format is Claude Code private and changes between versions.
 Every read is validated; anything unrecognized exits `2` and names the exact
 JSON path that broke. The dangerous case is a renamed token field: it would
 sum to zero and report an empty window forever, so it is a loud stop instead.
+The prompt fields and `output_tokens` are checked apart, so a renamed field on
+one side cannot hide behind the other's tokens.
 
 ## Use as a Stop hook
 

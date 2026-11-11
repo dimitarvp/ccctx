@@ -110,16 +110,16 @@ func TestRunUnderThreshold(t *testing.T) {
 		t.Errorf("keys:\n got %s\nwant %s", got, wantKeys)
 	}
 	checkValues(t, values, map[string]string{
-		"current_tokens":    "860000",
-		"high_water_tokens": "860000",
+		"current_tokens":    "864444",
+		"high_water_tokens": "864444",
 		"window_tokens":     "1000000",
 		"window_source":     "flag",
 		"usable_tokens":     "966000",
 		"threshold_tokens":  "927360",
 		"over_threshold":    "false",
 	})
-	if pct := usedPct(t, values); pct != "89.03" {
-		t.Errorf("used_pct = %s, want 89.03", pct)
+	if pct := usedPct(t, values); pct != "89.49" {
+		t.Errorf("used_pct = %s, want 89.49", pct)
 	}
 }
 
@@ -131,10 +131,44 @@ func TestRunOverThreshold(t *testing.T) {
 	}
 	_, values := decodeReport(t, res.stdout)
 	checkValues(t, values, map[string]string{
-		"high_water_tokens": "940000",
+		"high_water_tokens": "941000",
 		"threshold_tokens":  "927360",
 		"over_threshold":    "true",
 	})
+}
+
+// The reply is part of the context. The figures are a real forced compaction: the
+// last prompt held 953,841 tokens and its reply 11,865, together 965,706.
+func TestRunCountsOutput(t *testing.T) {
+	path := writeSession(t, reply("m1", 500_000, 2_000), reply("m2", 953_841, 11_865))
+	res := ccctx(t, "-no-threshold", "-transcript", path)
+	if res.code != exitOK {
+		t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+	}
+	_, values := decodeReport(t, res.stdout)
+	checkValues(t, values, map[string]string{
+		"current_tokens":    "965706",
+		"high_water_tokens": "965706",
+	})
+}
+
+// Claude Code writes a message id again as its reply streams in. The message is its
+// larger reading, whichever order the two arrive in.
+func TestRunKeepsLargestReading(t *testing.T) {
+	for _, outputs := range [][2]int{{100, 5_000}, {5_000, 100}} {
+		t.Run(fmt.Sprintf("output %d then %d", outputs[0], outputs[1]), func(t *testing.T) {
+			path := writeSession(t, reply("m1", 700_000, outputs[0]), reply("m1", 700_000, outputs[1]))
+			res := ccctx(t, "-no-threshold", "-transcript", path)
+			if res.code != exitOK {
+				t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+			}
+			_, values := decodeReport(t, res.stdout)
+			checkValues(t, values, map[string]string{
+				"current_tokens": "705000",
+				"turns":          "1",
+			})
+		})
+	}
 }
 
 // Without a window size there is nothing to judge: -no-threshold reports occupancy
@@ -183,13 +217,24 @@ func TestRunBadInvocation(t *testing.T) {
 	}
 }
 
-// A usage block whose token keys were renamed must stop the run, never read as an
-// empty context.
+// A usage block whose token keys were renamed must stop the run, never read as a
+// smaller context. The prompt side and the output are checked apart, so a rename on
+// one side cannot hide behind the other's tokens.
 func TestRunDrift(t *testing.T) {
-	path := writeSession(t, assistant("m1", 0, 0, 0, 0), assistant("m2", 0, 0, 0, 0))
-	res := ccctx(t, "-window", "1000000", "-transcript", path)
-	if res.code != exitDrift || res.stdout != "" || !strings.Contains(res.stderr, `"input_tokens"`) {
-		t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d naming the usage keys", res.code, res.stdout, res.stderr, exitDrift)
+	cases := []struct {
+		name, key string
+		entries   []string
+	}{
+		{"prompt side all zero", `"input_tokens"`, []string{assistant("m1", 0, 0, 0, 900), assistant("m2", 0, 0, 0, 1_200)}},
+		{"output all zero", `"message"."usage"."output_tokens"`, []string{reply("m1", 400_000, 0), reply("m2", 500_000, 0)}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
+			if res.code != exitDrift || res.stdout != "" || !strings.Contains(res.stderr, c.key) {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d naming %s", res.code, res.stdout, res.stderr, exitDrift, c.key)
+			}
+		})
 	}
 }
 
@@ -197,7 +242,7 @@ func TestRunPlain(t *testing.T) {
 	path := writeSession(t, reply("m1", 860_000, 4_444))
 	res := ccctx(t, "-plain", "-window", "1000000", "-transcript", path)
 	lines := strings.SplitN(res.stdout, "\n", 2)
-	if res.code != exitOK || len(lines) != 2 || lines[0] != "860000" || !strings.HasPrefix(lines[1], "meters: cache age ") {
+	if res.code != exitOK || len(lines) != 2 || lines[0] != "864444" || !strings.HasPrefix(lines[1], "meters: cache age ") {
 		t.Errorf("exit %d, stdout:\n%s\nwant exit %d, the high water on line 1, then the meters", res.code, res.stdout, exitOK)
 	}
 }
