@@ -62,7 +62,9 @@ count of the emptied window. ccctx then exits `0` with `count_known` false,
 judged on 0. `-plain` adds a last line saying the count is unknown until
 the next reply, after the usual lines. The
 same holds for a transcript that opens with a compaction. Every other report
-has `count_known` true.
+has `count_known` true. Past 50 main-thread entries after the compaction
+with no counted reply, ccctx exits `2` instead: either the conversation has
+not replied in all that time, or the assistant entry type moved.
 
 Sidechain (subagent) entries, their compactions included, and `<synthetic>`
 placeholder entries are skipped.

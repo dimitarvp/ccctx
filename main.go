@@ -15,7 +15,7 @@
 //     high-water mark resets at every isCompactSummary entry of the main thread, or
 //     it would report a peak that no longer exists. Until the next reply the count
 //     is unknown: count_known is false, the counts read 0 and the limits are judged
-//     on 0.
+//     on 0. Past maxUncounted main-thread entries with no reply, ccctx exits DRIFT.
 //
 // The window size is not in the transcript. Claude Code only reports it on the
 // statusline's stdin, so ccctx reads it from the sensor file the statusline writes for
@@ -143,6 +143,9 @@ func typed(fields map[string]json.RawMessage, key string, dst any) string {
 // it is a misread.
 const maxCount = 1_000_000_000
 
+// maxUncounted ends "count unknown", or a renamed assistant entry would keep it for ever.
+const maxUncounted = 50
+
 func usageCounts(usage map[string]json.RawMessage) (prompt, output int, err error) {
 	var n [4]int
 	for i, key := range [...]string{"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"} {
@@ -180,6 +183,7 @@ type stats struct {
 	zeroPrompt         int
 	zeroOutput         int
 	compactions        int
+	afterCompaction    int // main-thread entries since the last compaction
 	awaitingReply      bool
 	ccVersion          string
 	mistyped           string
@@ -507,8 +511,11 @@ func scan(path string) ([]turn, stats, error) {
 		if e.IsCompactSummary && !e.IsSidechain {
 			st.compactions++
 			byID, order = map[string]turn{}, nil // the window really did empty here
-			st.badUsage, st.unusableAfterCount = "", ""
+			st.badUsage, st.unusableAfterCount, st.afterCompaction = "", "", 0
 			continue
+		}
+		if !e.IsSidechain {
+			st.afterCompaction++
 		}
 		if e.Type != "assistant" {
 			continue
@@ -612,6 +619,11 @@ func verify(st *stats, path string) string {
 		return fmt.Sprintf("%s, and no counted reply comes after it.\n"+
 			"  A format change partway through a transcript looks like this: the count would stay at the last\n"+
 			"  reply ccctx could read while the context grows.\n%s", st.unusableAfterCount, where)
+	}
+	if st.awaitingReply && st.afterCompaction > maxUncounted {
+		return fmt.Sprintf("%d main-thread entries came after the last compaction without one counted reply.\n"+
+			"  Either the conversation has not replied in all that time, or the assistant entry type moved. Read as\n"+
+			"  \"count unknown\", the context would stay at 0 for ever.\n%s", st.afterCompaction, where)
 	}
 	return ""
 }
