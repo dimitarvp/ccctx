@@ -60,9 +60,12 @@ on the statusline's stdin, so a statusline script writes it to a sensor file:
 ~/.cache/claude_ctx/<session-id>.json    {"window": 1000000, ...}
 ```
 
-ccctx reads that, or takes `-window <tokens>`, or exits `2` and says how to
-supply one. Reading it live means a larger window on a future model moves
-both limits with no edits.
+ccctx reads that, or takes `-window <tokens>`. Without a usable sensor file
+of its own, it takes the window from another session's file (the first
+usable one by name) and warns on stderr. Only with no usable sensor file at
+all does it exit `2` and say how to supply one, or, under `-no-threshold`,
+report without limits. Reading it live means a larger window on a future
+model moves both limits with no edits.
 
 ## The two limits
 
@@ -91,11 +94,13 @@ as usual and exit `10` stays possible.
 ## Format drift is a hard error
 
 The transcript format is Claude Code private and changes between versions.
-Every read is validated; anything unrecognized exits `2` and names the exact
-JSON path that broke. The dangerous case is a renamed token field: it would
-sum to zero and report an empty window forever, so it is a loud stop instead.
-The prompt fields and `output_tokens` are checked apart, so a renamed field on
-one side cannot hide behind the other's tokens.
+ccctx exits `2` and says what it expected when the transcript has no
+parseable line, no assistant entry, or no usable entry (an assistant entry
+that is not skipped and has a usage block). It does the same when every
+usable entry has a prompt side of zero (the three prompt fields together),
+or an output of zero, which is what renamed keys look like. Not caught yet:
+a single renamed prompt field, or a format change that begins partway
+through a transcript, reads low without an error.
 
 ## Use as a Stop hook
 
