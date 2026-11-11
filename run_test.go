@@ -639,6 +639,37 @@ func TestRunUsageDrift(t *testing.T) {
 	}
 }
 
+// A count is an integer from 0 to 1,000,000,000. Anything else in an entry that would
+// be counted is drift naming the key, the value as written and the line, also when a
+// good reply follows it.
+func TestRunCountNotAnInteger(t *testing.T) {
+	entry := func(input, output string) string {
+		return `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"id":"m0","model":"claude-test","usage":` +
+			`{"input_tokens":` + input + `,"cache_read_input_tokens":500000,"cache_creation_input_tokens":1000,"output_tokens":` + output + `}}}`
+	}
+	cases := []struct{ name, entry, key, value string }{
+		{"a fraction", entry("10", "2.5"), `"output_tokens"`, "2.5"},
+		{"a string", entry(`"12"`, "2000"), `"input_tokens"`, `"12"`},
+		{"a negative number", entry("-1", "2000"), `"input_tokens"`, "-1"},
+		{"a number past int64", entry("10", "99999999999999999999"), `"output_tokens"`, "99999999999999999999"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entry, reply("m1", 500_000, 2_000)))
+			missing := []string{}
+			for _, s := range []string{c.key, c.value, "line 1"} {
+				if !strings.Contains(res.stderr, s) {
+					missing = append(missing, s)
+				}
+			}
+			if res.code != exitDrift || res.stdout != "" || len(missing) > 0 {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, stderr containing %q",
+					res.code, res.stdout, res.stderr, exitDrift, missing)
+			}
+		})
+	}
+}
+
 // What came before the last counted reply, or before the last compaction, no longer
 // decides the count, so it is no drift.
 func TestRunUsageNoDrift(t *testing.T) {
@@ -648,6 +679,7 @@ func TestRunUsageNoDrift(t *testing.T) {
 		entries       []string
 	}{
 		{"no usage before a counted reply", "502000", []string{noUsage, reply("m2", 500_000, 2_000)}},
+		{"a usage that is not an object before a counted reply", "502000", []string{strings.Replace(noUsage, `"model":"claude-test"`, `"model":"claude-test","usage":"x"`, 1), reply("m2", 500_000, 2_000)}},
 		{"an unparseable line before a counted reply", "502000", []string{"{this is not json}", reply("m2", 500_000, 2_000)}},
 		{"a renamed key before a compaction", "302000", []string{renamed, compaction, reply("m2", 300_000, 2_000)}},
 		{"a count of exactly 1e9", "1000500000", []string{reply("m1", 500_000, 1_000_000_000)}},
