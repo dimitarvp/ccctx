@@ -12,8 +12,8 @@
 //     conversation reported 215k on one model and 119k on another with no content
 //     lost, so the last turn alone understates occupancy. We take a high-water mark.
 //   - Compaction genuinely empties the window (~166k to ~25k observed). The
-//     high-water mark resets at every isCompactSummary entry, or it would report a
-//     peak that no longer exists.
+//     high-water mark resets at every isCompactSummary entry of the main thread, or
+//     it would report a peak that no longer exists.
 //
 // The window size is not in the transcript. Claude Code only reports it on the
 // statusline's stdin, so -window takes it from a sensor file the statusline writes;
@@ -353,7 +353,7 @@ func modSuffix(path string) string {
 	return fmt.Sprintf("  (modified %s, %d bytes)", fi.ModTime().Format("2006-01-02 15:04:05"), fi.Size())
 }
 
-// scan walks the transcript and returns the main-thread turns since the last
+// scan walks the transcript and returns the main thread's turns since its last
 // compaction, in order, alongside a tally of everything it saw. Streaming writes the
 // same message id repeatedly with growing usage, so a turn keeps its largest reading.
 func scan(path string) ([]turn, stats, error) {
@@ -388,7 +388,8 @@ func scan(path string) ([]turn, stats, error) {
 		if e.Version != "" {
 			st.ccVersion = e.Version // keep the last: that is the version still writing
 		}
-		if e.IsCompactSummary {
+		// A subagent compacting its own context leaves the main thread's window as it was.
+		if e.IsCompactSummary && !e.IsSidechain {
 			st.compactions++
 			byID, order = map[string]turn{}, nil // the window really did empty here
 			continue

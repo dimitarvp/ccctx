@@ -51,6 +51,11 @@ func reply(id string, prompt, output int) string {
 	return assistant(id, input, prompt-input-cacheCreation, cacheCreation, output)
 }
 
+// sidechain marks an entry as a subagent's.
+func sidechain(entry string) string {
+	return `{"isSidechain":true,` + strings.TrimPrefix(entry, "{")
+}
+
 // decodeReport parses the JSON report into its keys, in the order written, and their
 // values, with numbers kept exact.
 func decodeReport(t *testing.T, stdout string) (keys []string, values map[string]any) {
@@ -230,6 +235,28 @@ func TestRunKeepsLargestReading(t *testing.T) {
 			})
 		})
 	}
+}
+
+// A subagent that compacts empties its own context, not the main thread's: the main
+// turn before it still stands, and no compaction is counted.
+func TestRunSidechainCompaction(t *testing.T) {
+	path := writeSession(t,
+		reply("m1", 948_000, 3_000),
+		sidechain(`{"type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":"summary"}}`),
+		sidechain(reply("s1", 20_000, 500)),
+		sidechain(reply("s2", 21_000, 400)),
+	)
+	res := ccctx(t, "-window", "1000000", "-transcript", path)
+	if res.code != exitOver {
+		t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOver, res.stderr)
+	}
+	_, values := decodeReport(t, res.stdout)
+	checkValues(t, values, map[string]string{
+		"current_tokens":    "951000",
+		"high_water_tokens": "951000",
+		"turns":             "1",
+		"compactions":       "0",
+	})
 }
 
 // Without a window size there is nothing to judge: -no-threshold reports occupancy

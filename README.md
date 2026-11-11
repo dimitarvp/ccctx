@@ -48,7 +48,8 @@ Two corrections a naive reading needs:
 - **Compaction genuinely empties the window** (166k to 25k observed). The
   high-water mark resets at every compaction entry.
 
-Sidechain (subagent) turns and `<synthetic>` placeholder entries are skipped.
+Sidechain (subagent) entries, their compactions included, and `<synthetic>`
+placeholder entries are skipped.
 
 ## The window size
 
