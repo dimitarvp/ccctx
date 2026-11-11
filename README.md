@@ -48,6 +48,12 @@ Two corrections a naive reading needs:
 - **Compaction genuinely empties the window** (166k to 25k observed). The
   high-water mark resets at every compaction entry.
 
+Right after a compaction, before the next reply, the transcript holds no
+count of the emptied window. ccctx then exits `0` with `count_known` false,
+`current_tokens`, `high_water_tokens` and `turns` at 0, and the limits
+judged on 0. `-plain` says the count is unknown until the next reply. Every
+other report has `count_known` true.
+
 Sidechain (subagent) entries, their compactions included, and `<synthetic>`
 placeholder entries are skipped.
 
@@ -107,9 +113,6 @@ assistant entry without a usage block, after the last counted reply: that
 is what a format change partway through a transcript looks like. Followed
 by a counted reply, such lines stay warnings. A last line with no newline
 after it is one Claude Code is still writing, and ccctx leaves it out.
-
-One exit `2` is expected: right after a compaction, before the first reply,
-the transcript holds no turn to measure. It passes with the next reply.
 
 ## Use as a Stop hook
 

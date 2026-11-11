@@ -62,7 +62,7 @@ func TestReadMetersMissingFile(t *testing.T) {
 		t.Fatalf("got meters %v and error %v; want nil and a not-exist error", m, metersErr)
 	}
 	const highWater = 1234
-	rep := report{HighWater: highWater, Meters: m}
+	rep := report{CountKnown: true, HighWater: highWater, Meters: m}
 	warning := fmt.Sprintf("ccctx warning: no usage meters: %v\n", metersErr)
 
 	var merged bytes.Buffer

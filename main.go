@@ -13,7 +13,9 @@
 //     lost, so the last turn alone understates occupancy. We take a high-water mark.
 //   - Compaction genuinely empties the window (~166k to ~25k observed). The
 //     high-water mark resets at every isCompactSummary entry of the main thread, or
-//     it would report a peak that no longer exists.
+//     it would report a peak that no longer exists. Until the next reply the count
+//     is unknown: count_known is false, the counts read 0 and the limits are judged
+//     on 0.
 //
 // The window size is not in the transcript. Claude Code only reports it on the
 // statusline's stdin, so ccctx reads it from the sensor file the statusline writes for
@@ -168,6 +170,7 @@ type report struct {
 	SessionID    string         `json:"session_id"`
 	Transcript   string         `json:"transcript"`
 	CCVersion    string         `json:"cc_version,omitempty"`
+	CountKnown   bool           `json:"count_known"` // false right after a compaction, until the next reply
 	Current      int            `json:"current_tokens"`
 	HighWater    int            `json:"high_water_tokens"`
 	Model        string         `json:"model"`
@@ -237,7 +240,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			"  0   under the checkpoint line\n"+
 			"  10  at or over the checkpoint line\n"+
 			"  2   DRIFT: the transcript did not contain what it must, or no window size is known (see stderr)\n"+
-			"  1   bad invocation or unreadable file\n\n")
+			"  1   bad invocation or unreadable file\n\n"+
+			"Right after a compaction, until the next reply, count_known is false and the counts read 0.\n\n")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -270,7 +274,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		failf(stderr, "%v", err)
 		return exitFail
 	}
-	if msg := verify(turns, &st, path); msg != "" {
+	if msg := verify(&st, path); msg != "" {
 		drift(stderr, msg)
 		return exitDrift
 	}
@@ -517,7 +521,7 @@ func scan(path string) ([]turn, stats, error) {
 // verify decides whether the scan found what the format must contain. It returns a
 // message naming the exact JSON path that is missing, because the failure this guards
 // against is a renamed field quietly reading as an empty context window.
-func verify(turns []turn, st *stats, path string) string {
+func verify(st *stats, path string) string {
 	where := fmt.Sprintf("  transcript: %s\n  Claude Code version in transcript: %s", path, orUnknown(st.ccVersion))
 
 	switch {
@@ -566,10 +570,6 @@ func verify(turns []turn, st *stats, path string) string {
 		return fmt.Sprintf("%s, and no counted reply comes after it.\n"+
 			"  A format change partway through a transcript looks like this: the count would stay at the last\n"+
 			"  reply ccctx could read while the context grows.\n%s", st.trailing, where)
-
-	case len(turns) == 0:
-		return fmt.Sprintf("no turns survived after the last of %d compaction boundaries.\n"+
-			"  That is expected only if the session compacted and has not replied since.\n%s", st.compactions, where)
 	}
 	return ""
 }
@@ -594,8 +594,9 @@ func warn(stderr io.Writer, st *stats, path string) {
 
 // summarize takes the high-water mark across turns. A forced model switch only ever
 // reads lower, so the peak recovers the true occupancy and errs toward triggering early.
+// With no turns, right after a compaction, the count is unknown and every number is 0.
 func summarize(turns []turn) report {
-	rep := report{Turns: len(turns), PerModelPeak: map[string]int{}}
+	rep := report{CountKnown: len(turns) > 0, Turns: len(turns), PerModelPeak: map[string]int{}}
 	for _, t := range turns {
 		if t.ctx > rep.HighWater {
 			rep.HighWater = t.ctx
@@ -604,8 +605,10 @@ func summarize(turns []turn) report {
 			rep.PerModelPeak[t.model] = t.ctx
 		}
 	}
-	last := turns[len(turns)-1]
-	rep.Current, rep.Model = last.ctx, last.model
+	if rep.CountKnown {
+		last := turns[len(turns)-1]
+		rep.Current, rep.Model = last.ctx, last.model
+	}
 	return rep
 }
 
@@ -742,7 +745,11 @@ func metersText(m *meters) string {
 func writeReport(stdout, stderr io.Writer, rep *report, plain bool, metersErr error) error {
 	var out string
 	if plain {
-		out = fmt.Sprintf("%d\n%s%s", rep.HighWater, limitsText(rep.judgment), metersText(rep.Meters))
+		unknown := ""
+		if !rep.CountKnown {
+			unknown = "count unknown until the next reply (the conversation compacted and has not replied since)\n"
+		}
+		out = fmt.Sprintf("%d\n%s%s%s", rep.HighWater, unknown, limitsText(rep.judgment), metersText(rep.Meters))
 	} else {
 		b, err := json.MarshalIndent(rep, "", "  ")
 		if err != nil {
