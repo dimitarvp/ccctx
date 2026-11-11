@@ -290,7 +290,7 @@ func locate(stderr io.Writer, explicit, projects, uuid string, latest bool) (pat
 				"  Check the uuid, or pass -transcript with a full path", uuid, projects)
 		}
 		// Syncing sessions between machines leaves the same uuid under several project
-		// slugs (a macOS "-Users-dimi-…" beside a Linux "-home-dimi-…"). Picking one
+		// slugs (a macOS "-Users-<name>-…" beside a Linux "-home-<name>-…"). Picking one
 		// silently would serve a stale copy the moment they diverge, so say so.
 		if len(matches) > 1 {
 			newest := newestOf(stderr, matches)
