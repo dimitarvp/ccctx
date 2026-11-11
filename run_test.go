@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -351,6 +352,61 @@ func TestRunOpensWithCompaction(t *testing.T) {
 				"turns":             "0",
 				"compactions":       "1",
 			})
+		})
+	}
+}
+
+// The count is unknown after a compaction only until the next reply. Past 50 main-thread
+// entries with no counted reply, either the conversation stopped replying or the entry
+// type moved, so the report is drift.
+func TestRunUnknownTooLong(t *testing.T) {
+	kinds := []string{
+		`{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"hi"}}`,
+		`{"type":"attachment","timestamp":"2026-01-01T00:00:02Z"}`,
+		`{"type":"system","timestamp":"2026-01-01T00:00:02Z","content":"c"}`,
+	}
+	notReplies := func(n int, cycle ...string) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = cycle[i%len(cycle)]
+		}
+		return out
+	}
+	before := []string{reply("m1", 500_000, 2_000), compaction}
+
+	for _, c := range []struct {
+		name    string
+		entries []string
+	}{
+		{"after an opening compaction", slices.Concat([]string{compaction}, notReplies(51, kinds...))},
+		{"after a reply and a compaction", slices.Concat(before, notReplies(51, kinds...))},
+	} {
+		t.Run("one past the limit "+c.name, func(t *testing.T) {
+			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
+			first, _, _ := strings.Cut(res.stderr, "\n")
+			if res.code != exitDrift || res.stdout != "" || !strings.Contains(first, "51") {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, a first line counting 51 entries",
+					res.code, res.stdout, res.stderr, exitDrift)
+			}
+		})
+	}
+
+	for _, c := range []struct {
+		name, countKnown string
+		entries          []string
+	}{
+		{"at the limit", "false", slices.Concat(before, notReplies(50, kinds...))},
+		{"subagent entries past the limit", "false", slices.Concat(before, notReplies(60, sidechain(reply("s1", 20_000, 500))))},
+		{"under the limit after each of two compactions", "false", slices.Concat(before, notReplies(40, kinds...), []string{compaction}, notReplies(40, kinds...))},
+		{"past the limit, then a reply", "true", slices.Concat(before, notReplies(60, kinds...), []string{reply("m2", 30_000, 2_000)})},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
+			if res.code != exitOK {
+				t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+			}
+			_, values := decodeReport(t, res.stdout)
+			checkValues(t, values, map[string]string{"count_known": c.countKnown})
 		})
 	}
 }
