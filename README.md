@@ -32,6 +32,9 @@ drift or no window size, `1` bad invocation or unreadable file. See `-h`
 for `-window`, `-compaction-reserve`, `-checkpoint-room`, `-no-threshold`,
 `-projects`, `-sensor-dir`.
 
+Warnings come last on stderr: when ccctx fails, the first line of stderr
+says why.
+
 ## Where the number comes from
 
 Each assistant turn in the transcript records the usage of the prompt Claude

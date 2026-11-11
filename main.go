@@ -261,7 +261,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFail
 	}
 
-	path, sessionID, err := locate(stderr, *transcript, *projects, flags.Arg(0), *latest)
+	// Warnings wait for the end of the run, so a caller that shows only the first line of
+	// stderr sees the message that decided the exit code.
+	var warnings bytes.Buffer
+	defer func() { _, _ = warnings.WriteTo(stderr) }()
+
+	path, sessionID, err := locate(&warnings, *transcript, *projects, flags.Arg(0), *latest)
 	if err != nil {
 		failf(stderr, "%v", err)
 		return exitFail
@@ -276,14 +281,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		drift(stderr, msg)
 		return exitDrift
 	}
-	warn(stderr, &st, path)
+	warn(&warnings, &st, path)
 
 	rep := summarize(turns)
 	rep.SessionID, rep.Transcript = sessionID, path
 	rep.Compactions, rep.CCVersion = st.compactions, st.ccVersion
 
 	sensorPath := filepath.Join(*sensorDir, sessionID+".json")
-	windowSize, source := resolveWindow(stderr, *window, sensorPath)
+	windowSize, source := resolveWindow(&warnings, *window, sensorPath)
 	switch {
 	case windowSize > 0:
 		// Subtracting rather than adding, so huge flag values cannot overflow into a pass.
@@ -313,7 +318,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	usagePath := cmp.Or(os.Getenv("CCCTX_USAGE_FILE"), filepath.Join(home(), ".cache", "claude_usage_limits.json"))
 	var metersErr error
 	rep.Meters, metersErr = readMeters(usagePath, time.Now())
-	if err := writeReport(stdout, stderr, &rep, *plain, metersErr); err != nil {
+	if err := writeReport(stdout, &warnings, &rep, *plain, metersErr); err != nil {
 		failf(stderr, "cannot render report as JSON: %v", err)
 		return exitFail
 	}
