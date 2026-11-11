@@ -290,6 +290,37 @@ func TestRunBadInvocation(t *testing.T) {
 	}
 }
 
+// The flag package stops at the first argument that is not a flag. A session is judged
+// on the window a flag gives before its id; a flag after the id is refused, not dropped.
+func TestRunFlagAfterSessionID(t *testing.T) {
+	const id = "33333333-2222-3333-4444-555555555555"
+	projects := t.TempDir()
+	dir := filepath.Join(projects, "-project")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte(reply("m1", 147_000, 3_000)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res := ccctx(t, "-projects", projects, "-window", "200000", id)
+	if res.code != exitOver {
+		t.Errorf("flag before the id: exit %d, want %d; stderr:\n%s", res.code, exitOver, res.stderr)
+	}
+
+	for _, extra := range [][]string{{"-window", "200000"}, {"-plain"}} {
+		t.Run(strings.Join(extra, " "), func(t *testing.T) {
+			res := ccctx(t, append([]string{"-projects", projects, id}, extra...)...)
+			quoted := fmt.Sprintf("%q", extra)
+			if res.code != exitFail || res.stdout != "" || !strings.Contains(res.stderr, quoted) ||
+				!strings.Contains(res.stderr, "Flags go before the session id") {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, stderr quoting %s and saying flags go first",
+					res.code, res.stdout, res.stderr, exitFail, quoted)
+			}
+		})
+	}
+}
+
 // A usage block whose token keys were renamed must stop the run, never read as a
 // smaller context. The prompt side and the output are checked apart, so a rename on
 // one side cannot hide behind the other's tokens.

@@ -207,6 +207,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return exitFail // the flag package has already printed the error and the usage
 	}
+	// The flag package stops at the first argument that is not a flag, so anything after
+	// the session id would be dropped without a word.
+	if extra := flags.Args(); len(extra) > 1 {
+		failf(stderr, "unexpected arguments after the session id %q: %q\n"+
+			"  Flags go before the session id: ccctx [flags] [session-uuid]", extra[0], extra[1:])
+		return exitFail
+	}
 	if *window < 0 || *reserve < 0 || *room < 0 {
 		failf(stderr, "-window (%d), -compaction-reserve (%d) and -checkpoint-room (%d) are token counts and cannot be negative",
 			*window, *reserve, *room)
