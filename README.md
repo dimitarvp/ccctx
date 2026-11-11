@@ -84,8 +84,9 @@ checkpoint line on.
 
 `-compaction-reserve` (default 34000) and `-checkpoint-room` (default 30000)
 set the two margins; a window that cannot hold both is an error (exit `1`).
-With no window size, `-no-threshold` reports occupancy with none of these
-fields.
+`-no-threshold` stops requiring a window size: without one, the report
+carries occupancy with none of these fields; with one, the limits are judged
+as usual and exit `10` stays possible.
 
 ## Format drift is a hard error
 

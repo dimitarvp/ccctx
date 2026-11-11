@@ -185,7 +185,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		window     = flags.Int("window", 0, "context window size in tokens (0 = read sensor file)")
 		sensorDir  = flags.String("sensor-dir", filepath.Join(home(), ".cache", "claude_ctx"), "directory of statusline-written sensor files")
 		plain      = flags.Bool("plain", false, "print the token count, the limits, then the usage meters, as text instead of JSON")
-		noThresh   = flags.Bool("no-threshold", false, "report occupancy only; do not require a window size")
+		noThresh   = flags.Bool("no-threshold", false, "stop requiring a window size: without one, report occupancy alone; with one, judge the limits as usual, so exit 10 stays possible")
 		reserve    = flags.Int("compaction-reserve", 34000, "tokens Claude Code keeps back for its forced compaction, which comes at the window minus this")
 		room       = flags.Int("checkpoint-room", 30000, "tokens kept free below the forced compaction for the checkpoint itself; the checkpoint line sits this far below it")
 	)
@@ -260,7 +260,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			"  Fix by either:\n"+
 			"    - having the statusline write %s/<session-id>.json containing {\"window\": <tokens>}\n"+
 			"    - passing -window <tokens> explicitly\n"+
-			"    - passing -no-threshold to report occupancy without judging it",
+			"    - passing -no-threshold, which stops requiring a window size: without one, occupancy is reported\n"+
+			"      alone; with one, the limits are judged as usual and exit 10 stays possible",
 			rep.HighWater, *sensorDir))
 		return exitDrift
 	}
