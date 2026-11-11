@@ -27,8 +27,10 @@
 //
 // The transcript is Claude Code's private format and its own docs warn it changes
 // between versions. Every read is therefore checked against what the format is
-// expected to contain, and anything unrecognized exits DRIFT naming the exact JSON
-// path that disappeared — a renamed field must never read as an empty context.
+// expected to contain: a transcript with no parseable line, no assistant entry, no
+// usage block, a prompt side of zero in every turn or an output of zero in every turn
+// exits DRIFT naming the JSON path that disappeared, so a renamed token field cannot
+// read as an empty context.
 //
 // The report also carries the account's usage meters, read from the cache the
 // statusline keeps of Anthropic's usage endpoint, so one command shows both how full
