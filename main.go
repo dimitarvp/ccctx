@@ -567,6 +567,23 @@ func scan(path string) ([]turn, stats, error) {
 func verify(st *stats, path string) string {
 	where := fmt.Sprintf("  transcript: %s\n  Claude Code version in transcript: %s", path, orUnknown(st.ccVersion))
 
+	if st.badUsage != "" {
+		return fmt.Sprintf("%s.\n"+
+			"  Every assistant entry since the last compaction must carry all four counts, each an integer from 0 to %d.\n"+
+			"  Read as 0, a missing count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
+	}
+	if msg := wholeFileDrift(st, where); msg != "" && !st.awaitingReply {
+		return msg
+	}
+	if st.unusableAfterCount != "" {
+		return fmt.Sprintf("%s, and no counted reply comes after it.\n"+
+			"  A format change partway through a transcript looks like this: the count would stay at the last\n"+
+			"  reply ccctx could read while the context grows.\n%s", st.unusableAfterCount, where)
+	}
+	return ""
+}
+
+func wholeFileDrift(st *stats, where string) string {
 	switch {
 	case st.lines == 0:
 		return fmt.Sprintf("transcript is empty (0 lines).\n%s", where)
@@ -576,13 +593,6 @@ func verify(st *stats, path string) string {
 			"  first failure was line %d: %s\n"+
 			"  The transcript is expected to be JSON Lines, one object per line. That no longer holds.\n%s",
 			st.lines, st.firstParseErrNo, st.firstParseErrMsg, where)
-
-	case st.badUsage != "":
-		return fmt.Sprintf("%s.\n"+
-			"  Every assistant entry since the last compaction must carry all four counts, each an integer from 0 to %d.\n"+
-			"  Read as 0, a missing count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
-
-	case st.awaitingReply:
 
 	case st.assistant == 0:
 		return fmt.Sprintf("parsed %d lines but not one had \"type\":\"assistant\".\n"+
@@ -610,11 +620,6 @@ func verify(st *stats, path string) string {
 			"  \"message\".\"usage\".\"output_tokens\" is present but 0 in every turn. Every reply has output, and it stays in the context,\n"+
 			"  so the output is now counted somewhere else. Read as 0, this count would report the context short\n"+
 			"  by every reply's length, so it is a hard error instead.\n%s", st.usable, where)
-	}
-	if st.unusableAfterCount != "" {
-		return fmt.Sprintf("%s, and no counted reply comes after it.\n"+
-			"  A format change partway through a transcript looks like this: the count would stay at the last\n"+
-			"  reply ccctx could read while the context grows.\n%s", st.unusableAfterCount, where)
 	}
 	return ""
 }
