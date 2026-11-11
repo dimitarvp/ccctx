@@ -18,6 +18,9 @@ ccctx -transcript <path>      # an exact file
 ccctx -plain <uuid>           # the token count, the limits line, the meters, as text
 ```
 
+Give exactly one of a session id, `-transcript` and `-latest`. Two at once
+exit `1` naming both.
+
 The report ends with `meters` from `~/.cache/claude_usage_limits.json` (override:
 `CCCTX_USAGE_FILE`): the five-hour window, each `.limits[]` entry and the file's
 age in seconds. A missing or malformed file gives `null`; the exit code ignores it.

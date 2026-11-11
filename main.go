@@ -236,6 +236,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			"Reports context occupancy for a Claude Code conversation, how far it is from the\n"+
 			"checkpoint line and from the forced compaction, and the usage meters from\n"+
 			"~/.cache/claude_usage_limits.json (override with CCCTX_USAGE_FILE).\n\n"+
+			"Name the conversation with exactly one of a session uuid, -transcript <path> or -latest.\n\n"+
 			"Exit codes:\n"+
 			"  0   under the checkpoint line\n"+
 			"  10  at or over the checkpoint line\n"+
@@ -325,9 +326,28 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return exitOK
 }
 
-// locate resolves which transcript to read. An explicit path wins, then a session
-// uuid searched across every project directory, then the newest transcript on disk.
+// locate resolves which transcript to read from exactly one selector: an explicit
+// path, a session uuid searched across every project directory, or the newest
+// transcript on disk.
 func locate(stderr io.Writer, explicit, projects, uuid string, latest bool) (path, sessionID string, err error) {
+	var given []string
+	if uuid != "" {
+		given = append(given, "a session id")
+	}
+	if explicit != "" {
+		given = append(given, "-transcript")
+	}
+	if latest {
+		given = append(given, "-latest")
+	}
+	switch {
+	case len(given) == 0:
+		return "", "", fmt.Errorf("nothing to read: pass a session uuid, -transcript <path>, or -latest")
+	case len(given) > 1:
+		return "", "", fmt.Errorf("%s conflict: pass exactly one of a session uuid, -transcript <path>, or -latest",
+			strings.Join(given, " and "))
+	}
+
 	if explicit != "" {
 		if _, err := os.Stat(explicit); err != nil {
 			return "", "", fmt.Errorf("cannot read transcript %s: %w", explicit, err)
@@ -358,9 +378,6 @@ func locate(stderr io.Writer, explicit, projects, uuid string, latest bool) (pat
 			return newest, uuid, nil
 		}
 		return matches[0], uuid, nil
-	}
-	if !latest {
-		return "", "", fmt.Errorf("nothing to read: pass a session uuid, -transcript <path>, or -latest")
 	}
 	matches, _ := filepath.Glob(filepath.Join(projects, "*", "*.jsonl"))
 	if len(matches) == 0 {
