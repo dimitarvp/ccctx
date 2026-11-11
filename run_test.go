@@ -356,9 +356,6 @@ func TestRunOpensWithCompaction(t *testing.T) {
 	}
 }
 
-// The count is unknown after a compaction only until the next reply. Past 50 main-thread
-// entries with no counted reply, either the conversation stopped replying or the entry
-// type moved, so the report is drift.
 func TestRunUnknownTooLong(t *testing.T) {
 	kinds := []string{
 		`{"type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"hi"}}`,
@@ -721,9 +718,6 @@ func TestRunCountNotAnInteger(t *testing.T) {
 	}
 }
 
-// The fields that decide how an entry is sorted must hold their own JSON type. Read as
-// false or empty, another type would count a subagent reply or miss a compaction, so it
-// is drift wherever it stands.
 func TestRunMistypedSortingField(t *testing.T) {
 	with := func(field, entry string) string { return "{" + field + "," + strings.TrimPrefix(entry, "{") }
 	good := reply("m1", 500_000, 2_000)

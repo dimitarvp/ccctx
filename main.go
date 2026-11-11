@@ -15,7 +15,8 @@
 //     high-water mark resets at every isCompactSummary entry of the main thread, or
 //     it would report a peak that no longer exists. Until the next reply the count
 //     is unknown: count_known is false, the counts read 0 and the limits are judged
-//     on 0. Past maxUncounted main-thread entries with no reply, ccctx exits DRIFT.
+//     on 0. Past maxUncounted main-thread entries with no counted reply, ccctx exits
+//     DRIFT.
 //
 // The window size is not in the transcript. Claude Code only reports it on the
 // statusline's stdin, so ccctx reads it from the sensor file the statusline writes for
@@ -39,10 +40,10 @@
 // 1,000,000,000, and no line that is not a JSON object, nor an assistant entry without
 // usage, may come after the last counted reply; each breach exits DRIFT naming the key
 // or the line. A last line with no newline after it is still being written and is left
-// out. Anywhere in the transcript, the fields that sort an entry must hold their own
-// JSON type: type, isSidechain, isCompactSummary, and a main-thread assistant entry's
-// message and model. Any other value of an unexpected type matters only in an entry
-// that is counted.
+// out. Anywhere in the transcript, the fields that decide which entries count must hold
+// their own JSON type: type, isSidechain, isCompactSummary, and a main-thread assistant
+// entry's message and model. Any other value of an unexpected type matters only in an
+// entry that is counted.
 //
 // The report also carries the account's usage meters, read from the cache the
 // statusline keeps of Anthropic's usage endpoint, so one command shows both how full
@@ -92,10 +93,9 @@ type entry struct {
 	Message          json.RawMessage
 }
 
-// parseLine fails only when the line is not a JSON object. A field that decides how the
-// entry is sorted but holds another JSON type comes back as mistyped. Each field is
-// decoded on its own because after a value of the wrong type, encoding/json does not
-// promise to fill the fields that follow it.
+// parseLine fails only when the line is not a JSON object. Each field is decoded on its
+// own because after a value of the wrong type, encoding/json does not promise to fill
+// the fields that follow it.
 func parseLine(line []byte) (e entry, mistyped string, err error) {
 	fields, err := object(line)
 	if err != nil {
@@ -129,8 +129,8 @@ func field(fields map[string]json.RawMessage, key string, dst any) {
 	_ = json.Unmarshal(fields[key], dst)
 }
 
-// typed decodes a field that decides how an entry is sorted. An absent key leaves dst
-// empty. A value of another JSON type, null included, is returned as found.
+// typed reports, as text, a key present with another JSON type than dst's. encoding/json
+// decodes null into a string or bool without an error, so null is checked apart.
 func typed(fields map[string]json.RawMessage, key string, dst any) string {
 	raw, ok := fields[key]
 	if ok && (string(raw) == "null" || json.Unmarshal(raw, dst) != nil) {
@@ -183,7 +183,7 @@ type stats struct {
 	zeroPrompt         int
 	zeroOutput         int
 	compactions        int
-	afterCompaction    int // main-thread entries since the last compaction
+	sinceCompaction    int
 	awaitingReply      bool
 	ccVersion          string
 	mistyped           string
@@ -511,11 +511,11 @@ func scan(path string) ([]turn, stats, error) {
 		if e.IsCompactSummary && !e.IsSidechain {
 			st.compactions++
 			byID, order = map[string]turn{}, nil // the window really did empty here
-			st.badUsage, st.unusableAfterCount, st.afterCompaction = "", "", 0
+			st.badUsage, st.unusableAfterCount, st.sinceCompaction = "", "", 0
 			continue
 		}
 		if !e.IsSidechain {
-			st.afterCompaction++
+			st.sinceCompaction++
 		}
 		if e.Type != "assistant" {
 			continue
@@ -620,10 +620,10 @@ func verify(st *stats, path string) string {
 			"  A format change partway through a transcript looks like this: the count would stay at the last\n"+
 			"  reply ccctx could read while the context grows.\n%s", st.unusableAfterCount, where)
 	}
-	if st.awaitingReply && st.afterCompaction > maxUncounted {
+	if st.awaitingReply && st.sinceCompaction > maxUncounted {
 		return fmt.Sprintf("%d main-thread entries came after the last compaction without one counted reply.\n"+
 			"  Either the conversation has not replied in all that time, or the assistant entry type moved. Read as\n"+
-			"  \"count unknown\", the context would stay at 0 for ever.\n%s", st.afterCompaction, where)
+			"  \"count unknown\", the context would stay at 0 for ever.\n%s", st.sinceCompaction, where)
 	}
 	return ""
 }
