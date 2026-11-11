@@ -312,7 +312,6 @@ func TestRunAfterCompaction(t *testing.T) {
 	})
 	checkInvariant(t, values)
 
-	// A reader of -plain may go by line position, so the words come last.
 	res = ccctx(t, "-plain", "-window", "1000000", "-transcript", path)
 	lines := strings.Split(strings.TrimSuffix(res.stdout, "\n"), "\n")
 	if res.code != exitOK || len(lines) < 3 || lines[0] != "0" || !strings.HasPrefix(lines[1], "limits: checkpoint line") ||
@@ -322,8 +321,6 @@ func TestRunAfterCompaction(t *testing.T) {
 	}
 }
 
-// A transcript can open with a compaction. Until the first reply after it the count is
-// unknown, whatever else stands in the file that cannot be counted.
 func TestRunOpensWithCompaction(t *testing.T) {
 	synthetic := strings.Replace(assistant("m2", 0, 0, 0, 0), "claude-test", "<synthetic>", 1)
 	cases := []struct {
@@ -405,8 +402,6 @@ func TestRunWindowSource(t *testing.T) {
 	}
 }
 
-// A caller may show only the first line of stderr. Without a window size that line names
-// the way out, whatever else there is to warn about, and the warnings follow it.
 func TestRunNoWindowFirstLine(t *testing.T) {
 	const id = "22222222-2222-2222-2222-222222222222"
 	projects := t.TempDir()
@@ -642,9 +637,6 @@ func TestRunUsageDrift(t *testing.T) {
 	}
 }
 
-// A count is an integer from 0 to 1,000,000,000. Anything else in an entry that would
-// be counted is drift naming the key, the value as written and the line, also when a
-// good reply follows it.
 func TestRunCountNotAnInteger(t *testing.T) {
 	entry := func(input, output string) string {
 		return `{"type":"assistant","timestamp":"2026-01-01T00:00:00Z","message":{"id":"m0","model":"claude-test","usage":` +
@@ -699,8 +691,6 @@ func TestRunUsageNoDrift(t *testing.T) {
 	}
 }
 
-// A line is unparseable only when it is not a JSON object. A value of an unexpected
-// type in an entry that is never counted is no drift, even after the last counted reply.
 func TestRunOddValuesOutsideCountedEntries(t *testing.T) {
 	subagentCount := func(output string) string {
 		return sidechain(strings.Replace(reply("s1", 20_000, 500), `"output_tokens":500`, `"output_tokens":`+output, 1))

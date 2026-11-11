@@ -87,13 +87,10 @@ type entry struct {
 	Message          struct {
 		ID    string                     `json:"id"`
 		Model string                     `json:"model"`
-		Usage map[string]json.RawMessage `json:"usage"` // raw, so each count is read as written
+		Usage map[string]json.RawMessage `json:"usage"`
 	} `json:"message"`
 }
 
-// parseLine reads one transcript line. Only a line that is not a JSON object fails. A
-// value of the wrong type leaves its field empty instead: an entry that is never counted
-// may hold anything, and a counted entry's usage is checked key by key.
 func parseLine(line []byte) (entry, error) {
 	var e entry
 	err := json.Unmarshal(line, &e)
@@ -110,9 +107,6 @@ func parseLine(line []byte) (entry, error) {
 // it is a misread.
 const maxCount = 1_000_000_000
 
-// usageCounts reads the four counts of a usage block. Each must be written as an integer
-// from 0 to maxCount: a missing key or null never reads as 0, and a fraction, a string or
-// a number out of range never reads as a count.
 func usageCounts(usage map[string]json.RawMessage) (prompt, output int, err error) {
 	var n [4]int
 	for i, key := range [...]string{"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"} {
@@ -150,7 +144,7 @@ type stats struct {
 	zeroPrompt         int
 	zeroOutput         int
 	compactions        int
-	awaitingReply      bool // a compaction emptied the window and nothing has been counted since
+	awaitingReply      bool
 	ccVersion          string
 	badUsage           string
 	unusableAfterCount string
@@ -271,8 +265,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitFail
 	}
 
-	// Warnings wait for the end of the run, so a caller that shows only the first line of
-	// stderr sees the message that decided the exit code.
 	var warnings bytes.Buffer
 	defer func() { _, _ = warnings.WriteTo(stderr) }()
 
@@ -566,8 +558,6 @@ func verify(st *stats, path string) string {
 			"  Read as 0, a missing count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
 
 	case st.awaitingReply:
-		// Right after a compaction no entry in the file decides the count, so the
-		// whole-file checks below have nothing to judge.
 
 	case st.assistant == 0:
 		return fmt.Sprintf("parsed %d lines but not one had \"type\":\"assistant\".\n"+
