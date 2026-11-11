@@ -143,8 +143,8 @@ func typed(fields map[string]json.RawMessage, key string, dst any) string {
 // it is a misread.
 const maxCount = 1_000_000_000
 
-// maxUncounted ends "count unknown", or a renamed assistant entry would keep it for ever.
-const maxUncounted = 50
+// maxUncounted ends "count unknown" if the reply type moves; real transcripts show up to 45 entries before the first reply.
+const maxUncounted = 500
 
 func usageCounts(usage map[string]json.RawMessage) (prompt, output int, err error) {
 	var n [4]int
