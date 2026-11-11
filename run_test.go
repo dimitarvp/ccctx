@@ -375,14 +375,14 @@ func TestRunUnknownTooLong(t *testing.T) {
 		name    string
 		entries []string
 	}{
-		{"after an opening compaction", slices.Concat([]string{compaction}, notReplies(51, kinds...))},
-		{"after a reply and a compaction", slices.Concat(before, notReplies(51, kinds...))},
+		{"after an opening compaction", slices.Concat([]string{compaction}, notReplies(501, kinds...))},
+		{"after a reply and a compaction", slices.Concat(before, notReplies(501, kinds...))},
 	} {
 		t.Run("one past the limit "+c.name, func(t *testing.T) {
 			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
 			first, _, _ := strings.Cut(res.stderr, "\n")
-			if res.code != exitDrift || res.stdout != "" || !strings.Contains(first, "51") {
-				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, a first line counting 51 entries",
+			if res.code != exitDrift || res.stdout != "" || !strings.Contains(first, "501") {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, a first line counting 501 entries",
 					res.code, res.stdout, res.stderr, exitDrift)
 			}
 		})
@@ -392,10 +392,11 @@ func TestRunUnknownTooLong(t *testing.T) {
 		name, countKnown string
 		entries          []string
 	}{
-		{"at the limit", "false", slices.Concat(before, notReplies(50, kinds...))},
-		{"subagent entries past the limit", "false", slices.Concat(before, notReplies(60, sidechain(reply("s1", 20_000, 500))))},
-		{"under the limit after each of two compactions", "false", slices.Concat(before, notReplies(40, kinds...), []string{compaction}, notReplies(40, kinds...))},
-		{"past the limit, then a reply", "true", slices.Concat(before, notReplies(60, kinds...), []string{reply("m2", 30_000, 2_000)})},
+		{"at the limit", "false", slices.Concat(before, notReplies(500, kinds...))},
+		{"sixty entries, more than real transcripts hold before a reply", "false", slices.Concat(before, notReplies(60, kinds...))},
+		{"subagent entries past the limit", "false", slices.Concat(before, notReplies(600, sidechain(reply("s1", 20_000, 500))))},
+		{"under the limit after each of two compactions", "false", slices.Concat(before, notReplies(400, kinds...), []string{compaction}, notReplies(400, kinds...))},
+		{"past the limit, then a reply", "true", slices.Concat(before, notReplies(600, kinds...), []string{reply("m2", 30_000, 2_000)})},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			res := ccctx(t, "-window", "1000000", "-transcript", writeSession(t, c.entries...))
