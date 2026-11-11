@@ -15,16 +15,17 @@ transcript on disk.
 ccctx <session-uuid>          # by session id, searched under ~/.claude/projects
 ccctx -latest                 # the most recently modified transcript
 ccctx -transcript <path>      # an exact file
-ccctx -plain <uuid>           # the token count, then the meters, as text
+ccctx -plain <uuid>           # the token count, the limits line, the meters, as text
 ```
 
 The report ends with `meters` from `~/.cache/claude_usage_limits.json` (override:
 `CCCTX_USAGE_FILE`): the five-hour window, each `.limits[]` entry and the file's
 age in seconds. A missing or malformed file gives `null`; the exit code ignores it.
 
-Exit codes: `0` under the threshold, `10` at or over it, `2` format drift,
-`1` bad invocation or unreadable file. See `-h` for `-threshold`, `-window`,
-`-no-threshold`, `-projects`, `-sensor-dir`.
+Exit codes: `0` under the checkpoint line, `10` at or over it, `2` format
+drift, `1` bad invocation or unreadable file. See `-h` for `-window`,
+`-compaction-reserve`, `-checkpoint-room`, `-no-threshold`, `-projects`,
+`-sensor-dir`.
 
 ## Where the number comes from
 
@@ -59,8 +60,31 @@ on the statusline's stdin, so a statusline script writes it to a sensor file:
 ```
 
 ccctx reads that, or takes `-window <tokens>`, or exits `2` and says how to
-supply one. Reading it live means a larger window on a future model raises
-the threshold with no edits.
+supply one. Reading it live means a larger window on a future model moves
+both limits with no edits.
+
+## The two limits
+
+The window size is never the limit. Claude Code keeps back 34,000 tokens for
+its own compaction, on any window size, and forces one when the context
+reaches the window minus that. A checkpoint written before then costs 25,000
+to 30,000 tokens, so the checkpoint line sits 30,000 lower:
+
+| window    | forced compaction | checkpoint line |
+|-----------|-------------------|-----------------|
+| 1,000,000 | 966,000           | 936,000         |
+| 200,000   | 166,000           | 136,000         |
+
+The report carries them as `usable_tokens` and `checkpoint_line_tokens`, and
+the tokens left to each as `left_to_compaction_tokens` and
+`left_to_checkpoint_tokens`, negative once past it. `used_pct` is the
+high-water mark as a percentage of `usable_tokens`. ccctx exits `10` from the
+checkpoint line on.
+
+`-compaction-reserve` (default 34000) and `-checkpoint-room` (default 30000)
+set the two margins; a window that cannot hold both is an error (exit `1`).
+With no window size, `-no-threshold` reports occupancy with none of these
+fields.
 
 ## Format drift is a hard error
 
@@ -73,8 +97,8 @@ one side cannot hide behind the other's tokens.
 
 ## Use as a Stop hook
 
-A Stop hook runs ccctx when a turn ends and, past the threshold, returns
-`{"decision":"block","reason":"..."}` asking the session to checkpoint.
+A Stop hook runs ccctx when a turn ends and, from the checkpoint line on,
+returns `{"decision":"block","reason":"..."}` asking the session to checkpoint.
 Checks happen at turn boundaries, so one very long turn can still overshoot.
 
 ## Install

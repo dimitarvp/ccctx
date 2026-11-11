@@ -17,7 +17,13 @@
 //
 // The window size is not in the transcript. Claude Code only reports it on the
 // statusline's stdin, so -window takes it from a sensor file the statusline writes;
-// without one there is no threshold to judge and ccctx exits DRIFT.
+// without one there are no limits to judge against and ccctx exits DRIFT.
+//
+// The window itself is never the limit. Claude Code keeps back a reserve for its own
+// compaction and forces one at the window minus that reserve: 966,000 on a 1,000,000
+// window. A checkpoint written before then needs room of its own, so the checkpoint
+// line sits that room lower: 936,000. Both margins are token counts, the same on any
+// window size, never fractions of it. At or past the checkpoint line ccctx exits OVER.
 //
 // The transcript is Claude Code's private format and its own docs warn it changes
 // between versions. Every read is therefore checked against what the format is
@@ -27,7 +33,7 @@
 // The report also carries the account's usage meters, read from the cache the
 // statusline keeps of Anthropic's usage endpoint, so one command shows both how full
 // the context is and how much of the usage limits is spent. The meters never change
-// the exit code, which answers only the context threshold.
+// the exit code, which answers only whether the context reached the checkpoint line.
 package main
 
 import (
@@ -47,10 +53,10 @@ import (
 
 // Exit codes. Anything other than OK or OVER means the answer is unusable.
 const (
-	exitOK    = 0  // under threshold
+	exitOK    = 0  // under the checkpoint line
 	exitFail  = 1  // bad invocation, unreadable file
 	exitDrift = 2  // transcript read but did not contain what it must
-	exitOver  = 10 // at or over threshold
+	exitOver  = 10 // at or over the checkpoint line
 )
 
 // maxLine caps a transcript line. Lines hold whole tool results and run big; the
@@ -106,6 +112,19 @@ type sensor struct {
 	Window int `json:"window"`
 }
 
+// judgment is what ccctx can say once it knows the window size. The report carries none
+// when no window size is known.
+type judgment struct {
+	Window           int     `json:"window_tokens"`
+	WindowSource     string  `json:"window_source"`
+	Usable           int     `json:"usable_tokens"`             // window - compaction reserve: Claude Code forces a compaction here
+	UsedPct          float64 `json:"used_pct"`                  // high water / usable * 100
+	CheckpointLine   int     `json:"checkpoint_line_tokens"`    // usable - checkpoint room
+	LeftToCheckpoint int     `json:"left_to_checkpoint_tokens"` // checkpoint line - high water; negative once past it
+	LeftToCompaction int     `json:"left_to_compaction_tokens"` // usable - high water; negative once past it
+	Over             bool    `json:"over_checkpoint_line"`      // high water >= checkpoint line
+}
+
 type report struct {
 	SessionID    string         `json:"session_id"`
 	Transcript   string         `json:"transcript"`
@@ -116,13 +135,8 @@ type report struct {
 	Turns        int            `json:"turns"`
 	Compactions  int            `json:"compactions"`
 	PerModelPeak map[string]int `json:"per_model_peak"`
-	Window       int            `json:"window_tokens,omitempty"`
-	WindowSource string         `json:"window_source,omitempty"`
-	Usable       int            `json:"usable_tokens,omitempty"`
-	UsedPct      float64        `json:"used_pct,omitempty"`
-	Threshold    int            `json:"threshold_tokens,omitempty"`
-	Over         bool           `json:"over_threshold"`
-	Meters       *meters        `json:"meters"`
+	*judgment
+	Meters *meters `json:"meters"`
 }
 
 // usageCache is the part of the statusline's usage cache that the meters report: the
@@ -170,18 +184,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		latest     = flags.Bool("latest", false, "use the most recently modified transcript")
 		window     = flags.Int("window", 0, "context window size in tokens (0 = read sensor file)")
 		sensorDir  = flags.String("sensor-dir", filepath.Join(home(), ".cache", "claude_ctx"), "directory of statusline-written sensor files")
-		frac       = flags.Float64("threshold", 0.96, "fraction of the window that counts as over")
-		plain      = flags.Bool("plain", false, "print the token count, then the usage meters, as text instead of JSON")
+		plain      = flags.Bool("plain", false, "print the token count, the limits, then the usage meters, as text instead of JSON")
 		noThresh   = flags.Bool("no-threshold", false, "report occupancy only; do not require a window size")
-		reserve    = flags.Int("compaction-reserve", 34000, "tokens Claude Code keeps back for its forced compaction: subtracted from the window before the percentage and the threshold")
+		reserve    = flags.Int("compaction-reserve", 34000, "tokens Claude Code keeps back for its forced compaction, which comes at the window minus this")
+		room       = flags.Int("checkpoint-room", 30000, "tokens kept free below the forced compaction for the checkpoint itself; the checkpoint line sits this far below it")
 	)
 	flags.Usage = func() {
 		_, _ = fmt.Fprint(stderr, "usage: ccctx [flags] [session-uuid]\n\n"+
-			"Reports context occupancy for a Claude Code conversation, and the usage meters\n"+
-			"from ~/.cache/claude_usage_limits.json (override with CCCTX_USAGE_FILE).\n\n"+
+			"Reports context occupancy for a Claude Code conversation, how far it is from the\n"+
+			"checkpoint line and from the forced compaction, and the usage meters from\n"+
+			"~/.cache/claude_usage_limits.json (override with CCCTX_USAGE_FILE).\n\n"+
 			"Exit codes:\n"+
-			"  0   under threshold\n"+
-			"  10  at or over threshold\n"+
+			"  0   under the checkpoint line\n"+
+			"  10  at or over the checkpoint line\n"+
 			"  2   DRIFT: the transcript did not contain what it must (see stderr)\n"+
 			"  1   bad invocation or unreadable file\n\n")
 		flags.PrintDefaults()
@@ -191,11 +206,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return exitOK
 		}
 		return exitFail // the flag package has already printed the error and the usage
-	}
-
-	if *frac <= 0 || *frac > 1 {
-		failf(stderr, "-threshold must be between 0 and 1, got %v", *frac)
-		return exitFail
 	}
 
 	path, sessionID, err := locate(stderr, *transcript, *projects, flags.Arg(0), *latest)
@@ -219,12 +229,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rep.SessionID, rep.Transcript = sessionID, path
 	rep.Compactions, rep.CCVersion = st.compactions, st.ccVersion
 
-	rep.Window, rep.WindowSource = resolveWindow(stderr, *window, *sensorDir, sessionID)
+	windowSize, source := resolveWindow(stderr, *window, *sensorDir, sessionID)
 	switch {
-	case rep.Window > 0:
-		rep.Usable, rep.UsedPct, rep.Threshold, rep.Over = judge(rep.HighWater, rep.Window, *reserve, *frac)
+	case windowSize > 0:
+		// Subtracting rather than adding, so huge flag values cannot overflow into a pass.
+		if *reserve < 0 || *room < 0 || windowSize-*reserve <= *room {
+			failf(stderr, "a window of %d tokens must be larger than the compaction reserve (%d) plus the checkpoint room (%d), and neither may be negative",
+				windowSize, *reserve, *room)
+			return exitFail
+		}
+		j := judge(rep.HighWater, windowSize, *reserve, *room)
+		j.WindowSource = source
+		rep.judgment = &j
 	case !*noThresh:
-		drift(stderr, fmt.Sprintf("no context window size available, so %d tokens cannot be judged against a threshold.\n"+
+		drift(stderr, fmt.Sprintf("no context window size available, so %d tokens cannot be judged against the checkpoint line.\n"+
 			"  Claude Code reveals the window size ONLY on the statusline's stdin (.context_window.context_window_size);\n"+
 			"  it is never written to the transcript.\n"+
 			"  Fix by either:\n"+
@@ -244,7 +262,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		failf(stderr, "cannot render report as JSON: %v", err)
 		return exitFail
 	}
-	if rep.Over {
+	if rep.judgment != nil && rep.Over {
 		return exitOver
 	}
 	return exitOK
@@ -509,20 +527,21 @@ func summarize(turns []turn) report {
 	return rep
 }
 
-// judge measures the high-water mark against the usable window: the reported
-// window minus the compaction reserve, because Claude Code compacts at the
-// reported size minus that reserve (observed: a 1,000,000 window compacts at
-// 966,000), so a percentage against the full window reads too low. A reserve
-// that would leave nothing is ignored rather than judged against zero.
-func judge(highWater, window, reserve int, frac float64) (usable int, usedPct float64, threshold int, over bool) {
-	usable = window
-	if reserve > 0 && reserve < window {
-		usable = window - reserve
+// judge measures the high-water mark against the two limits. Both margins are fixed
+// token counts, not fractions of the window: Claude Code keeps back the same reserve,
+// and a checkpoint costs the same, on any window size.
+func judge(highWater, window, reserve, room int) judgment {
+	usable := window - reserve
+	line := usable - room
+	return judgment{
+		Window:           window,
+		Usable:           usable,
+		UsedPct:          float64(highWater) / float64(usable) * 100,
+		CheckpointLine:   line,
+		LeftToCheckpoint: line - highWater,
+		LeftToCompaction: usable - highWater,
+		Over:             highWater >= line,
 	}
-	usedPct = float64(highWater) / float64(usable) * 100
-	threshold = int(float64(usable) * frac)
-	over = highWater >= threshold
-	return usable, usedPct, threshold, over
 }
 
 // resolveWindow finds the context window size, which the transcript never records.
@@ -551,7 +570,7 @@ func resolveWindow(stderr io.Writer, explicit int, sensorDir, sessionID string) 
 }
 
 // readSensor reads one sensor file. A sensor that exists but cannot be used is
-// reported loudly, since silently ignoring it is how a threshold stops being checked.
+// reported loudly, since silently ignoring it is how a limit stops being checked.
 func readSensor(stderr io.Writer, path string, complain bool) (int, bool) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -619,6 +638,15 @@ func readMeters(path string, now time.Time) (*meters, error) {
 	return m, nil
 }
 
+// limitsText renders the judgment for -plain, on one line.
+func limitsText(j *judgment) string {
+	if j == nil {
+		return "limits: null\n"
+	}
+	return fmt.Sprintf("limits: checkpoint line %d (%d left), forced compaction %d (%d left)\n",
+		j.CheckpointLine, j.LeftToCheckpoint, j.Usable, j.LeftToCompaction)
+}
+
 // metersText renders the meters for -plain, one window per line.
 func metersText(m *meters) string {
 	if m == nil {
@@ -647,7 +675,7 @@ func metersText(m *meters) string {
 func writeReport(stdout, stderr io.Writer, rep *report, plain bool, metersErr error) error {
 	var out string
 	if plain {
-		out = fmt.Sprintf("%d\n%s", rep.HighWater, metersText(rep.Meters))
+		out = fmt.Sprintf("%d\n%s%s", rep.HighWater, limitsText(rep.judgment), metersText(rep.Meters))
 	} else {
 		b, err := json.MarshalIndent(rep, "", "  ")
 		if err != nil {

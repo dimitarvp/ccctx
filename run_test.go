@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -97,7 +98,23 @@ func usedPct(t *testing.T, values map[string]any) string {
 	return fmt.Sprintf("%.2f", pct)
 }
 
-func TestRunUnderThreshold(t *testing.T) {
+// checkInvariant holds for every report with limits: over_checkpoint_line is true
+// exactly when nothing is left to the checkpoint line.
+func checkInvariant(t *testing.T, values map[string]any) {
+	t.Helper()
+	n, _ := values["left_to_checkpoint_tokens"].(json.Number)
+	left, err := n.Int64()
+	if err != nil {
+		t.Fatalf("left_to_checkpoint_tokens = %v, want an integer", values["left_to_checkpoint_tokens"])
+	}
+	if over := values["over_checkpoint_line"] == true; over != (left <= 0) {
+		t.Errorf("over_checkpoint_line is %v with %d tokens left to the checkpoint line", over, left)
+	}
+}
+
+// A session under the checkpoint line on a known window: every field of the report,
+// in order, and exit 0.
+func TestRunUnderTheLine(t *testing.T) {
 	path := writeSession(t, reply("m1", 400_000, 1_000), reply("m2", 860_000, 4_444))
 	res := ccctx(t, "-window", "1000000", "-transcript", path)
 	if res.code != exitOK {
@@ -105,51 +122,95 @@ func TestRunUnderThreshold(t *testing.T) {
 	}
 	keys, values := decodeReport(t, res.stdout)
 	wantKeys := "session_id transcript cc_version current_tokens high_water_tokens model turns compactions per_model_peak " +
-		"window_tokens window_source usable_tokens used_pct threshold_tokens over_threshold meters"
+		"window_tokens window_source usable_tokens used_pct checkpoint_line_tokens " +
+		"left_to_checkpoint_tokens left_to_compaction_tokens over_checkpoint_line meters"
 	if got := strings.Join(keys, " "); got != wantKeys {
 		t.Errorf("keys:\n got %s\nwant %s", got, wantKeys)
 	}
 	checkValues(t, values, map[string]string{
-		"current_tokens":    "864444",
-		"high_water_tokens": "864444",
-		"window_tokens":     "1000000",
-		"window_source":     "flag",
-		"usable_tokens":     "966000",
-		"threshold_tokens":  "927360",
-		"over_threshold":    "false",
+		"current_tokens":            "864444",
+		"high_water_tokens":         "864444",
+		"window_tokens":             "1000000",
+		"window_source":             "flag",
+		"usable_tokens":             "966000",
+		"checkpoint_line_tokens":    "936000",
+		"left_to_checkpoint_tokens": "71556",
+		"left_to_compaction_tokens": "101556",
+		"over_checkpoint_line":      "false",
 	})
 	if pct := usedPct(t, values); pct != "89.49" {
 		t.Errorf("used_pct = %s, want 89.49", pct)
 	}
+	checkInvariant(t, values)
 }
 
-func TestRunOverThreshold(t *testing.T) {
-	path := writeSession(t, reply("m1", 940_000, 1_000))
+// The checkpoint line is a token count: one token under it passes, the line itself
+// asks for the checkpoint, and past it the distance to the line goes negative.
+func TestRunCheckpointLine(t *testing.T) {
+	cases := []struct {
+		highWater, code                    int
+		leftToCheckpoint, leftToCompaction string
+		over                               string
+	}{
+		{935_999, exitOK, "1", "30001", "false"},
+		{936_000, exitOver, "0", "30000", "true"},
+		{940_000, exitOver, "-4000", "26000", "true"},
+	}
+	for _, c := range cases {
+		t.Run(strconv.Itoa(c.highWater), func(t *testing.T) {
+			path := writeSession(t, reply("m1", c.highWater-3_000, 3_000))
+			res := ccctx(t, "-window", "1000000", "-transcript", path)
+			if res.code != c.code {
+				t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, c.code, res.stderr)
+			}
+			_, values := decodeReport(t, res.stdout)
+			checkValues(t, values, map[string]string{
+				"high_water_tokens":         strconv.Itoa(c.highWater),
+				"checkpoint_line_tokens":    "936000",
+				"left_to_checkpoint_tokens": c.leftToCheckpoint,
+				"left_to_compaction_tokens": c.leftToCompaction,
+				"over_checkpoint_line":      c.over,
+			})
+			checkInvariant(t, values)
+		})
+	}
+}
+
+// The margins are token counts, so a 200,000 window keeps the same 34,000 and 30,000
+// below it.
+func TestRunSmallWindow(t *testing.T) {
+	path := writeSession(t, reply("m1", 120_000, 2_000))
+	res := ccctx(t, "-window", "200000", "-transcript", path)
+	if res.code != exitOK {
+		t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+	}
+	_, values := decodeReport(t, res.stdout)
+	checkValues(t, values, map[string]string{
+		"usable_tokens":             "166000",
+		"checkpoint_line_tokens":    "136000",
+		"left_to_checkpoint_tokens": "14000",
+		"left_to_compaction_tokens": "44000",
+	})
+	checkInvariant(t, values)
+}
+
+// The reply is part of the context. The figures are a real forced compaction: the
+// last prompt held 953,841 tokens and its reply 11,865, which left 294 tokens to the
+// compaction where the prompt alone said 12,159.
+func TestRunCountsOutput(t *testing.T) {
+	path := writeSession(t, reply("m1", 500_000, 2_000), reply("m2", 953_841, 11_865))
 	res := ccctx(t, "-window", "1000000", "-transcript", path)
 	if res.code != exitOver {
 		t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOver, res.stderr)
 	}
 	_, values := decodeReport(t, res.stdout)
 	checkValues(t, values, map[string]string{
-		"high_water_tokens": "941000",
-		"threshold_tokens":  "927360",
-		"over_threshold":    "true",
+		"current_tokens":            "965706",
+		"high_water_tokens":         "965706",
+		"left_to_checkpoint_tokens": "-29706",
+		"left_to_compaction_tokens": "294",
 	})
-}
-
-// The reply is part of the context. The figures are a real forced compaction: the
-// last prompt held 953,841 tokens and its reply 11,865, together 965,706.
-func TestRunCountsOutput(t *testing.T) {
-	path := writeSession(t, reply("m1", 500_000, 2_000), reply("m2", 953_841, 11_865))
-	res := ccctx(t, "-no-threshold", "-transcript", path)
-	if res.code != exitOK {
-		t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
-	}
-	_, values := decodeReport(t, res.stdout)
-	checkValues(t, values, map[string]string{
-		"current_tokens":    "965706",
-		"high_water_tokens": "965706",
-	})
+	checkInvariant(t, values)
 }
 
 // Claude Code writes a message id again as its reply streams in. The message is its
@@ -172,7 +233,7 @@ func TestRunKeepsLargestReading(t *testing.T) {
 }
 
 // Without a window size there is nothing to judge: -no-threshold reports occupancy
-// alone, and without it the missing size is drift.
+// alone, with none of the limit fields, and without it the missing size is drift.
 func TestRunNoWindow(t *testing.T) {
 	path := writeSession(t, reply("m1", 500_000, 2_000))
 
@@ -181,7 +242,7 @@ func TestRunNoWindow(t *testing.T) {
 		t.Fatalf("-no-threshold: exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
 	}
 	keys, _ := decodeReport(t, res.stdout)
-	wantKeys := "session_id transcript cc_version current_tokens high_water_tokens model turns compactions per_model_peak over_threshold meters"
+	wantKeys := "session_id transcript cc_version current_tokens high_water_tokens model turns compactions per_model_peak meters"
 	if got := strings.Join(keys, " "); got != wantKeys {
 		t.Errorf("keys:\n got %s\nwant %s", got, wantKeys)
 	}
@@ -198,20 +259,30 @@ func TestRunBadInvocation(t *testing.T) {
 		name   string
 		args   []string
 		code   int
-		stderr string
+		stderr []string
 	}{
-		{"unknown flag", []string{"-bogus", "-transcript", path}, exitFail, "flag provided but not defined: -bogus"},
-		{"flag value that is not a number", []string{"-window", "lots", "-transcript", path}, exitFail, `invalid value "lots"`},
-		{"threshold out of range", []string{"-threshold", "1.5", "-window", "1000000", "-transcript", path}, exitFail, "-threshold must be between 0 and 1"},
-		{"missing transcript", []string{"-transcript", filepath.Join(t.TempDir(), "absent.jsonl")}, exitFail, "cannot read transcript"},
-		{"help", []string{"-h"}, exitOK, "usage: ccctx"},
+		{"unknown flag", []string{"-bogus", "-transcript", path}, exitFail, []string{"flag provided but not defined: -bogus"}},
+		{"-threshold is not a flag", []string{"-threshold", "0.9", "-window", "1000000", "-transcript", path}, exitFail, []string{"flag provided but not defined: -threshold"}},
+		{"flag value that is not a number", []string{"-window", "lots", "-transcript", path}, exitFail, []string{`invalid value "lots"`}},
+		{"window smaller than reserve plus room", []string{"-window", "60000", "-transcript", path}, exitFail, []string{"60000", "34000", "30000"}},
+		{"window equal to reserve plus room", []string{"-window", "64000", "-transcript", path}, exitFail, []string{"64000", "34000", "30000"}},
+		{"negative checkpoint room", []string{"-window", "1000000", "-checkpoint-room", "-1", "-transcript", path}, exitFail, []string{"1000000", "34000", "(-1)"}},
+		{"negative compaction reserve", []string{"-window", "1000000", "-compaction-reserve", "-5", "-transcript", path}, exitFail, []string{"1000000", "(-5)", "30000"}},
+		{"missing transcript", []string{"-transcript", filepath.Join(t.TempDir(), "absent.jsonl")}, exitFail, []string{"cannot read transcript"}},
+		{"help", []string{"-h"}, exitOK, []string{"usage: ccctx", "-checkpoint-room"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			res := ccctx(t, c.args...)
-			if res.code != c.code || res.stdout != "" || !strings.Contains(res.stderr, c.stderr) {
+			missing := []string{}
+			for _, s := range c.stderr {
+				if !strings.Contains(res.stderr, s) {
+					missing = append(missing, s)
+				}
+			}
+			if res.code != c.code || res.stdout != "" || len(missing) > 0 {
 				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, stderr containing %q",
-					res.code, res.stdout, res.stderr, c.code, c.stderr)
+					res.code, res.stdout, res.stderr, c.code, missing)
 			}
 		})
 	}
@@ -238,11 +309,39 @@ func TestRunDrift(t *testing.T) {
 	}
 }
 
+// -plain prints the high water, then the limits on one line, then the meters.
 func TestRunPlain(t *testing.T) {
-	path := writeSession(t, reply("m1", 860_000, 4_444))
-	res := ccctx(t, "-plain", "-window", "1000000", "-transcript", path)
-	lines := strings.SplitN(res.stdout, "\n", 2)
-	if res.code != exitOK || len(lines) != 2 || lines[0] != "864444" || !strings.HasPrefix(lines[1], "meters: cache age ") {
-		t.Errorf("exit %d, stdout:\n%s\nwant exit %d, the high water on line 1, then the meters", res.code, res.stdout, exitOK)
+	cases := []struct {
+		name      string
+		highWater int
+		args      []string
+		code      int
+		limits    string
+	}{
+		{
+			"under the line", 864_444,
+			[]string{"-window", "1000000"},
+			exitOK,
+			"limits: checkpoint line 936000 (71556 left), forced compaction 966000 (101556 left)",
+		},
+		{
+			"past the line", 940_000,
+			[]string{"-window", "1000000"},
+			exitOver,
+			"limits: checkpoint line 936000 (-4000 left), forced compaction 966000 (26000 left)",
+		},
+		{"no window", 864_444, []string{"-no-threshold"}, exitOK, "limits: null"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			path := writeSession(t, reply("m1", c.highWater-4_444, 4_444))
+			res := ccctx(t, append([]string{"-plain", "-transcript", path}, c.args...)...)
+			lines := strings.SplitN(res.stdout, "\n", 3)
+			if res.code != c.code || len(lines) != 3 || lines[0] != strconv.Itoa(c.highWater) ||
+				lines[1] != c.limits || !strings.HasPrefix(lines[2], "meters: cache age ") {
+				t.Errorf("exit %d, stdout:\n%s\nwant exit %d, then %d, then %q, then the meters",
+					res.code, res.stdout, c.code, c.highWater, c.limits)
+			}
+		})
 	}
 }
