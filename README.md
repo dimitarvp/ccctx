@@ -28,9 +28,9 @@ exit code ignores it. A file without a five-hour block gives
 `"five_hour": null` and keeps the limits, with no warning.
 
 Exit codes: `0` under the checkpoint line, `10` at or over it, `2` format
-drift, `1` bad invocation or unreadable file. See `-h` for `-window`,
-`-compaction-reserve`, `-checkpoint-room`, `-no-threshold`, `-projects`,
-`-sensor-dir`.
+drift or no window size, `1` bad invocation or unreadable file. See `-h`
+for `-window`, `-compaction-reserve`, `-checkpoint-room`, `-no-threshold`,
+`-projects`, `-sensor-dir`.
 
 ## Where the number comes from
 
