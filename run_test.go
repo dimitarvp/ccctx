@@ -256,6 +256,26 @@ func TestRunKeepsLargestReading(t *testing.T) {
 	}
 }
 
+// Claude Code writes a placeholder entry, model "<synthetic>" with an all-zero usage
+// block, for refusals and API errors. One landing last leaves the count at the last
+// real reply.
+func TestRunSyntheticLast(t *testing.T) {
+	synthetic := strings.Replace(assistant("m2", 0, 0, 0, 0), "claude-test", "<synthetic>", 1)
+	path := writeSession(t, reply("m1", 500_000, 3_010), synthetic)
+	res := ccctx(t, "-window", "1000000", "-transcript", path)
+	if res.code != exitOK {
+		t.Fatalf("exit %d, want %d; stderr:\n%s", res.code, exitOK, res.stderr)
+	}
+	_, values := decodeReport(t, res.stdout)
+	checkValues(t, values, map[string]string{
+		"count_known":       "true",
+		"current_tokens":    "503010",
+		"high_water_tokens": "503010",
+		"model":             "claude-test",
+		"turns":             "1",
+	})
+}
+
 // A subagent that compacts empties its own context, not the main thread's: the main
 // turn before it still stands, and no compaction is counted.
 func TestRunSidechainCompaction(t *testing.T) {
