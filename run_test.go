@@ -441,6 +441,46 @@ func TestRunDrift(t *testing.T) {
 	}
 }
 
+// A transcript is named by exactly one of a session id, -transcript and -latest. Two
+// at once is a mistake to report by name, never a silent choice of one.
+func TestRunSelectors(t *testing.T) {
+	const id = "11111111-1111-1111-1111-111111111111"
+	projects := t.TempDir()
+	dir := filepath.Join(projects, "-project")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte(reply("m1", 500_000, 2_000)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeSession(t, reply("m1", 600_000, 2_000))
+	cases := []struct {
+		name   string
+		args   []string
+		stderr []string
+	}{
+		{"-transcript and a session id", []string{"-transcript", path, id}, []string{"-transcript", "session id"}},
+		{"-latest and a session id", []string{"-latest", id}, []string{"-latest", "session id"}},
+		{"-latest and -transcript", []string{"-latest", "-transcript", path}, []string{"-latest", "-transcript"}},
+		{"none", nil, []string{"nothing to read"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, append([]string{"-window", "1000000", "-projects", projects}, c.args...)...)
+			missing := []string{}
+			for _, s := range c.stderr {
+				if !strings.Contains(res.stderr, s) {
+					missing = append(missing, s)
+				}
+			}
+			if res.code != exitFail || res.stdout != "" || len(missing) > 0 {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, stderr containing %q",
+					res.code, res.stdout, res.stderr, exitFail, missing)
+			}
+		})
+	}
+}
+
 // A usage block that cannot be read whole stops the run, and so do unusable lines after
 // the last counted reply, where a format change partway through a transcript would
 // leave the count at the last reply ccctx could read. Each message names the key or
