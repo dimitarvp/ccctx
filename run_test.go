@@ -367,6 +367,49 @@ func TestRunWindowSource(t *testing.T) {
 	}
 }
 
+// A caller may show only the first line of stderr. Without a window size that line names
+// the way out, whatever else there is to warn about, and the warnings follow it.
+func TestRunNoWindowFirstLine(t *testing.T) {
+	const id = "22222222-2222-2222-2222-222222222222"
+	projects := t.TempDir()
+	for _, slug := range []string{"-Users-someone-project", "-home-someone-project"} {
+		dir := filepath.Join(projects, slug)
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, id+".jsonl"), []byte(reply("m1", 500_000, 2_000)+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sensorDir := func(body string) string {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	path := writeSession(t, reply("m1", 500_000, 2_000))
+	cases := []struct {
+		name, warning string
+		args          []string
+	}{
+		{"the session's sensor file is not JSON", "not valid JSON", []string{"-sensor-dir", sensorDir(`{"window":`), "-transcript", path}},
+		{"the session's sensor file says 0", `no usable "window"`, []string{"-sensor-dir", sensorDir(`{"window":0}`), "-transcript", path}},
+		{"an earlier unparseable line", "unparseable", []string{"-transcript", writeSession(t, "{this is not json}", reply("m1", 500_000, 2_000))}},
+		{"two transcripts share the session id", "2 transcripts share session", []string{"-projects", projects, id}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			res := ccctx(t, c.args...)
+			first, rest, _ := strings.Cut(res.stderr, "\n")
+			if res.code != exitDrift || res.stdout != "" || !strings.Contains(first, "-window <tokens>") || !strings.Contains(rest, c.warning) {
+				t.Errorf("exit %d, stdout %q, stderr:\n%s\nwant exit %d, no stdout, a first line naming -window <tokens>, then a warning containing %q",
+					res.code, res.stdout, res.stderr, exitDrift, c.warning)
+			}
+		})
+	}
+}
+
 func TestRunBadInvocation(t *testing.T) {
 	path := writeSession(t, reply("m1", 500_000, 2_000))
 	cases := []struct {
