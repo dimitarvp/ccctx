@@ -781,7 +781,7 @@ func writeReport(stdout, stderr io.Writer, rep *report, plain bool, metersErr er
 		if !rep.CountKnown {
 			unknown = "count unknown until the next reply (the conversation compacted and has not replied since)\n"
 		}
-		out = fmt.Sprintf("%d\n%s%s%s", rep.HighWater, unknown, limitsText(rep.judgment), metersText(rep.Meters))
+		out = fmt.Sprintf("%d\n%s%s%s", rep.HighWater, limitsText(rep.judgment), metersText(rep.Meters), unknown)
 	} else {
 		b, err := json.MarshalIndent(rep, "", "  ")
 		if err != nil {

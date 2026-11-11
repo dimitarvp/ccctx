@@ -59,7 +59,8 @@ Two corrections a naive reading needs:
 Right after a compaction, before the next reply, the transcript holds no
 count of the emptied window. ccctx then exits `0` with `count_known` false,
 `current_tokens`, `high_water_tokens` and `turns` at 0, and the limits
-judged on 0. `-plain` says the count is unknown until the next reply. The
+judged on 0. `-plain` adds a last line saying the count is unknown until
+the next reply, after the usual lines. The
 same holds for a transcript that opens with a compaction. Every other report
 has `count_known` true.
 
