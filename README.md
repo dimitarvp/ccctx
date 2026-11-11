@@ -117,8 +117,9 @@ or an output of zero. These whole-file checks wait while the count is
 unknown right after a compaction.
 
 Since the last compaction, every usage block must carry all four counts,
-each from 0 to 1,000,000,000. A missing key or a count out of range exits
-`2` naming the key and the line. So does an unparseable line, or an
+each an integer from 0 to 1,000,000,000. A missing key, or a count that is a
+fraction, a string or out of range, exits `2` naming the key, the value and
+the line, even when a good reply follows. So does an unparseable line, or an
 assistant entry without a usage block, after the last counted reply: that
 is what a format change partway through a transcript looks like. Followed
 by a counted reply, such lines stay warnings. A last line with no newline

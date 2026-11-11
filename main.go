@@ -35,8 +35,8 @@
 // usage block, a prompt side of zero in every turn or an output of zero in every turn
 // exits DRIFT naming the JSON path that disappeared. Those whole-file checks wait while
 // the count is unknown right after a compaction. Since the last compaction, every
-// usage block must carry all four counts, each from 0 to 1,000,000,000, and no
-// unparseable line or assistant entry without usage may come after the last counted
+// usage block must carry all four counts, each an integer from 0 to 1,000,000,000, and
+// no unparseable line or assistant entry without usage may come after the last counted
 // reply; each breach exits DRIFT naming the key or the line. A last line with no
 // newline after it is still being written and is left out.
 //
@@ -57,6 +57,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -83,42 +84,33 @@ type entry struct {
 	Timestamp        string `json:"timestamp"`
 	Version          string `json:"version"`
 	Message          struct {
-		ID    string      `json:"id"`
-		Model string      `json:"model"`
-		Usage *usageBlock `json:"usage"`
+		ID    string                     `json:"id"`
+		Model string                     `json:"model"`
+		Usage map[string]json.RawMessage `json:"usage"` // raw, so each count is read as written
 	} `json:"message"`
-}
-
-// usageBlock holds its counts as pointers so a missing key reads as missing, never as 0.
-type usageBlock struct {
-	InputTokens         *int `json:"input_tokens"`
-	CacheReadTokens     *int `json:"cache_read_input_tokens"`
-	CacheCreationTokens *int `json:"cache_creation_input_tokens"`
-	OutputTokens        *int `json:"output_tokens"`
 }
 
 // maxCount bounds one usage count. No context window comes near it, so a count past
 // it is a misread.
 const maxCount = 1_000_000_000
 
-func (u *usageBlock) counts() (prompt, output int, err error) {
-	for _, c := range []struct {
-		key string
-		n   *int
-	}{
-		{"input_tokens", u.InputTokens},
-		{"cache_read_input_tokens", u.CacheReadTokens},
-		{"cache_creation_input_tokens", u.CacheCreationTokens},
-		{"output_tokens", u.OutputTokens},
-	} {
-		switch {
-		case c.n == nil:
-			return 0, 0, fmt.Errorf(`"message"."usage" has no %q`, c.key)
-		case *c.n < 0 || *c.n > maxCount:
-			return 0, 0, fmt.Errorf(`"message"."usage".%q is %d, outside 0 to %d`, c.key, *c.n, maxCount)
+// usageCounts reads the four counts of a usage block. Each must be written as an integer
+// from 0 to maxCount: a missing key or null never reads as 0, and a fraction, a string or
+// a number out of range never reads as a count.
+func usageCounts(usage map[string]json.RawMessage) (prompt, output int, err error) {
+	var n [4]int
+	for i, key := range [...]string{"input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "output_tokens"} {
+		raw, ok := usage[key]
+		if !ok || string(raw) == "null" {
+			return 0, 0, fmt.Errorf(`"message"."usage" has no %q`, key)
 		}
+		c, err := strconv.Atoi(string(raw))
+		if err != nil || c < 0 || c > maxCount {
+			return 0, 0, fmt.Errorf(`"message"."usage".%q is %s, not an integer from 0 to %d`, key, raw, maxCount)
+		}
+		n[i] = c
 	}
-	return *u.InputTokens + *u.CacheReadTokens + *u.CacheCreationTokens, *u.OutputTokens, nil
+	return n[0] + n[1] + n[2], n[3], nil
 }
 
 type turn struct {
@@ -489,7 +481,7 @@ func scan(path string) ([]turn, stats, error) {
 			st.unusableAfterCount = cmp.Or(st.unusableAfterCount, fmt.Sprintf(`line %d is an assistant entry without "message"."usage"`, st.lines))
 			continue
 		}
-		prompt, output, err := e.Message.Usage.counts()
+		prompt, output, err := usageCounts(e.Message.Usage)
 		if err != nil {
 			st.badUsage = cmp.Or(st.badUsage, fmt.Sprintf("line %d: %v", st.lines, err))
 			continue
@@ -554,7 +546,7 @@ func verify(st *stats, path string) string {
 
 	case st.badUsage != "":
 		return fmt.Sprintf("%s.\n"+
-			"  Every assistant entry since the last compaction must carry all four counts, each from 0 to %d.\n"+
+			"  Every assistant entry since the last compaction must carry all four counts, each an integer from 0 to %d.\n"+
 			"  Read as 0, a missing count would report the context smaller than it is.\n%s", st.badUsage, maxCount, where)
 
 	case st.awaitingReply:
